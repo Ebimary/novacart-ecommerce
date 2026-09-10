@@ -1,6 +1,6 @@
 # NovaCart — Full-stack E-commerce Portfolio Project
 
-A portfolio-ready full-stack e-commerce demo: a customer storefront plus a server-side-protected admin dashboard, built with Node.js, Express and SQLite.
+A portfolio-ready full-stack e-commerce demo: a customer storefront plus a server-side-protected admin dashboard, built with Node.js, Express and MySQL.
 
 ## Features
 
@@ -30,19 +30,29 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 
 ## Tech
 - Node.js 18+ / Express
-- SQLite via `better-sqlite3`
-- `express-session` with a custom SQLite session store
+- MySQL 8+ / MariaDB 10.5+ via `mysql2`
+- `express-session` with a MySQL session store (logins survive restarts)
 - `bcryptjs` password hashing
 - Vanilla JS front-end (no bundler), CSP security headers
 
 ## Run locally
-1. Install Node.js 18+.
-2. From the project folder run `npm install`.
-3. Run `npm start`.
-4. Open http://localhost:3000
-5. Admin dashboard: http://localhost:3000/admin
+1. Install Node.js 18+ and MySQL 8+ (or MariaDB 10.5+).
+2. Create the database and a user (or adjust the variables below):
 
-The SQLite database `novacart.db` is created — and seeded with sample products and categories — automatically on first run.
+   ```sql
+   CREATE DATABASE novacart CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   CREATE USER 'novacart'@'localhost' IDENTIFIED BY 'novacart';
+   GRANT ALL PRIVILEGES ON novacart.* TO 'novacart'@'localhost';
+   FLUSH PRIVILEGES;
+   ```
+
+3. From the project folder run `npm install`.
+4. Configure the connection (see the variables table) — the defaults point at `novacart@localhost:3306/novacart`.
+5. Run `npm start`.
+6. Open http://localhost:3000
+7. Admin dashboard: http://localhost:3000/admin
+
+The schema, and a seed catalog with sample products and categories, are created automatically on the first run. The database can be connected with a single `DATABASE_URL` or individual `MYSQL_*` variables.
 
 ## Public API
 
@@ -75,7 +85,13 @@ Change the password from the admin **Settings** tab, or override the defaults wi
 | `PORT` | `3000` | HTTP port |
 | `ADMIN_EMAIL` | `admin@novacart.com` | Admin login email (seeded on first run) |
 | `ADMIN_PASSWORD` | `admin123` | Admin login password (seeded on first run) |
-| `SESSION_SECRET` | random, generated at startup | Signs the admin session cookie |
+| `SESSION_SECRET` | `nova-local-dev-secret-change-me` | Signs the admin session cookie — set a strong value in production (`openssl rand -hex 32`) |
+| `DATABASE_URL` | `mysql://user:pass@host:port/novacart` | Full MySQL connection string (overrides the `MYSQL_*` variables) |
+| `MYSQL_HOST` | `localhost` | MySQL host |
+| `MYSQL_PORT` | `3306` | MySQL port |
+| `MYSQL_USER` | `novacart` | MySQL user |
+| `MYSQL_PASSWORD` | `` | MySQL password |
+| `MYSQL_DATABASE` | `novacart` | MySQL database name |
 
 ## Deploying on Render
 
@@ -83,8 +99,10 @@ Change the password from the admin **Settings** tab, or override the defaults wi
 2. In Render, create a **New → Web Service**, select the repository.
 3. Build command: `npm install`
 4. Start command: `node server.js`
-5. Add environment variables: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `SESSION_SECRET`.
-6. **Important:** SQLite writes to a local file that is reset on every deploy/restart. For a portfolio demo this is acceptable, but persistent data across restarts requires a managed PostgreSQL database or another ephemeral-friendly store.
+5. Add a MySQL database. Render does not offer a managed MySQL add-on, so use an external provider such as PlanetScale (MySQL-compatible), Railway, or Aiven, and pass its connection string as `DATABASE_URL`.
+6. Add environment variables: `DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `SESSION_SECRET`.
+
+Thanks to the MySQL session store, any existing admin sessions remain valid after redeploys as long as the database is unchanged.
 
 The trust proxy setting is enabled and the session cookie is sent as `Secure` only in production (`NODE_ENV=production`, set automatically by Render) over HTTPS.
 
