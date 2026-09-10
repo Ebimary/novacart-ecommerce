@@ -167,6 +167,10 @@ tr:hover td{background:#fcfaf7}
 .mcheck input{width:17px;height:17px;accent-color:var(--adaccent)}
 .mbuttons{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
 .mbuttons .tbtn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 18px}
+.cat-field{display:flex;gap:8px;align-items:flex-start}
+.cat-field select{flex:1}
+.cat-field .tbtn{white-space:nowrap;padding:0 14px}
+#catDeleteMsg{font-size:14.5px;color:var(--adsoft);margin-bottom:16px;line-height:1.55}
 
 /* Order modal */
 .om-total{display:flex;justify-content:space-between;padding:10px 0;font-size:14.5px}

@@ -17,6 +17,7 @@
     <nav class="side-nav" aria-label="Admin navigation">
       <a href="#" class="side-link active" data-tab="dashboard">Dashboard</a>
       <a href="#" class="side-link" data-tab="products">Products</a>
+      <a href="#" class="side-link" data-tab="categories">Categories</a>
       <a href="#" class="side-link" data-tab="orders">Orders</a>
       <a href="#" class="side-link" data-tab="customers">Customers</a>
       <a href="#" class="side-link" data-tab="inventory">Inventory</a>
@@ -74,6 +75,17 @@
           <button class="btn-accent admin-active" id="addProductBtn">+ Add product</button>
         </div>
         <div id="productsTable" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- CATEGORIES -->
+    <section id="tab-categories" class="tab" style="display:none">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Categories</h2>
+          <button class="btn-accent admin-active" id="addCategoryBtn">+ Add category</button>
+        </div>
+        <div id="categoriesTable" class="table-wrap"></div>
       </div>
     </section>
 
@@ -146,14 +158,12 @@
     <p class="form-error" id="productError" style="display:none"></p>
     <div class="mfield"><label for="pName">Product name</label><input id="pName" type="text" required></div>
     <div class="mfield"><label for="pCategory">Category</label>
-      <select id="pCategory" required>
-        <option value="">Select category…</option>
-        <option>Clothing</option>
-        <option>Shoes</option>
-        <option>Jewelry</option>
-        <option>Accessories</option>
-        <option>Bags</option>
-      </select>
+      <div class="cat-field">
+        <select id="pCategory" required>
+          <option value="">Select category…</option>
+        </select>
+        <button type="button" class="tbtn" id="addCatQuick">+ New</button>
+      </div>
     </div>
     <div class="mfields-2">
       <div class="mfield"><label for="pPrice">Price (₦)</label><input id="pPrice" type="number" min="0" step="1" required></div>
@@ -168,6 +178,41 @@
       <button class="btn-accent admin-active" type="submit" id="productModalSave">Save product</button>
     </div>
   </form>
+</div>
+
+<!-- Category modal -->
+<div class="modal" id="categoryModal">
+  <form class="modal-card" id="categoryForm" novalidate>
+    <button type="button" class="modal-x" id="categoryModalClose" aria-label="Close">&times;</button>
+    <h2 id="categoryFormTitle">Add category</h2>
+    <p class="form-error" id="categoryError" style="display:none"></p>
+    <div class="mfield"><label for="cName">Category name</label><input id="cName" type="text" required></div>
+    <div class="mfield"><label for="cSlug">Slug <small style="color:var(--admuted)">(blank = auto-generated)</small></label><input id="cSlug" type="text" placeholder="auto-generated"></div>
+    <div class="mfield"><label for="cImage">Image URL</label><input id="cImage" type="url" placeholder="https://…"></div>
+    <div class="mfield"><label for="cDescription">Description</label><textarea id="cDescription" rows="3"></textarea></div>
+    <div class="mbuttons">
+      <button type="button" class="tbtn" id="categoryModalCancel">Cancel</button>
+      <button class="btn-accent admin-active" type="submit" id="categoryModalSave">Save category</button>
+    </div>
+  </form>
+</div>
+
+<!-- Move & delete category modal -->
+<div class="modal" id="catDeleteModal">
+  <div class="modal-card">
+    <button type="button" class="modal-x" id="catDeleteModalClose" aria-label="Close">&times;</button>
+    <h2>Delete category</h2>
+    <p class="form-error" id="catDeleteError" style="display:none"></p>
+    <p id="catDeleteMsg"></p>
+    <div class="mfield" id="catMoveField">
+      <label for="catMoveTo">Move its products to</label>
+      <select id="catMoveTo"></select>
+    </div>
+    <div class="mbuttons">
+      <button type="button" class="tbtn" id="catDeleteCancel">Cancel</button>
+      <button class="btn-accent admin-active" id="catDeleteConfirm">Move &amp; delete</button>
+    </div>
+  </div>
 </div>
 
 <!-- Single order detail modal -->

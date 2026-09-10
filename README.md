@@ -5,9 +5,10 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 ## Features
 
 ### Storefront (customer-facing)
-- Home, shop, product, cart, checkout, confirmation, about, contact, privacy, terms and 404/500 pages
-- Curated homepage with featured products, bestsellers and category cards
+- Home, shop, product, cart, checkout, confirmation, about, contact, privacy, terms and 404/500 pages, plus dedicated `/category/<slug>` pages
+- Curated homepage with featured products, bestsellers and category cards pulled live from the database
 - Product search, category filters, price range and sorting
+- Category navigation (desktop dropdown, mobile menu, footer) generated automatically from the database
 - Shopping bag stored in `localStorage` with quantity controls
 - Checkout with validation, stock checks, delivery-fee logic and automatic inventory decrement
 - Order confirmation lookup protected by order email
@@ -18,7 +19,9 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 ### Admin (server-side protected)
 - Secure login at `/admin/login` (`express-session` + `bcryptjs`), all `/api/admin/*` routes require a session
 - Dashboard with revenue, orders, customers, low/out-of-stock counts and a 14-day sales chart
-- Product CRUD (create, edit, delete, featured, rating, duplicate-name protection)
+- Product CRUD (create, edit, delete, featured, rating, duplicate-name protection) with a category dropdown populated from the database and a quick "+ New" option to create a category inline
+- **Category management**: add, edit and delete categories (auto-generated slugs, custom images and descriptions, duplicate-protection)
+- Deleting a category with products is blocked; admins can reassign its products to another category in the same step
 - Order management with status updates and full detail view
 - Customer list with order counts and total spend
 - Inventory table with low/out-of-stock badges
@@ -39,7 +42,27 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 4. Open http://localhost:3000
 5. Admin dashboard: http://localhost:3000/admin
 
-The SQLite database `novacart.db` is created — and seeded with sample products — automatically on first run.
+The SQLite database `novacart.db` is created — and seeded with sample products and categories — automatically on first run.
+
+## Public API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/health` | Health check |
+| `GET /api/config` | Store config (delivery fee, threshold, currency) |
+| `GET /api/categories` | Categories with product counts (`?slug=` to fetch one) |
+| `GET /api/categories/:id` | Single category |
+| `GET /api/products` | Product list (`?q=&category=&category_id=&slug=&sort=&min=&max=&featured=&limit=`) |
+| `GET /api/products/:id` | Single product |
+| `GET /api/products/:id/related` | Related products |
+| `GET /api/home` | Homepage data (featured, bestsellers, categories) |
+| `GET /api/orders/:id?email=` | Order lookup by order number + email |
+
+This project deliberately exposes **no** admin data publicly — every `/api/admin/*` route requires an authenticated session.
+
+## Data model
+
+`products` link to `categories` through a relational `category_id` foreign key. A denormalised `products.category` label is kept in sync whenever a category is renamed, so existing queries and filters keep working unmodified. Categories are seeded idempotently on startup (only when the table is empty), and slugs are auto-generated from category names (`Hats & Caps` → `hats-and-caps`). Deleting a category is blocked while it still contains products unless those products are moved to another category first.
 
 ### Default admin credentials (local demo only)
 - Email: `admin@novacart.com`

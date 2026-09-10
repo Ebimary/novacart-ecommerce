@@ -55,7 +55,7 @@
     currentTab = tab;
     document.querySelectorAll(".side-link").forEach(a => a.classList.toggle("active", a.dataset.tab === tab));
     document.querySelectorAll(".tab").forEach(s => { s.style.display = s.id === "tab-" + tab ? "block" : "none"; });
-    const titles = { dashboard: "Dashboard", products: "Products", orders: "Orders", customers: "Customers", inventory: "Inventory", analytics: "Analytics", settings: "Settings" };
+    const titles = { dashboard: "Dashboard", products: "Products", categories: "Categories", orders: "Orders", customers: "Customers", inventory: "Inventory", analytics: "Analytics", settings: "Settings" };
     $("pageTitle").textContent = titles[tab] || "Dashboard";
     window.scrollTo({ top: 0 });
     if (window.innerWidth < 980) document.querySelector(".sidebar").classList.remove("open");
@@ -114,6 +114,17 @@
   /* ---------------- Products ---------------- */
   let editingProduct = null;
 
+  let categoriesList = [];
+  async function loadCategoriesIntoSelect(preferred) {
+    try { categoriesList = await api("/api/categories"); }
+    catch (_) { return; }
+    const sel = $("pCategory");
+    const current = preferred != null ? preferred : sel.value;
+    sel.innerHTML = '<option value="">Select category…</option>' +
+      categoriesList.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join("");
+    if (current && categoriesList.some(c => c.name === current)) sel.value = current;
+  }
+
   async function loadProducts() {
     try {
       const products = await api("/api/admin/products");
@@ -147,13 +158,13 @@
     $("pFeatured").checked = false;
     $("productError").classList.remove("show");
     $("productModal").classList.add("open");
+    loadCategoriesIntoSelect();
   }
 
-  function openEditModal(p) {
+  async function openEditModal(p) {
     editingProduct = p;
     $("productFormTitle").textContent = "Edit product";
     $("pName").value = p.name;
-    $("pCategory").value = p.category;
     $("pPrice").value = p.price;
     $("pStock").value = p.stock;
     $("pImage").value = p.image;
@@ -161,6 +172,8 @@
     $("pRating").value = p.rating || 4.5;
     $("pFeatured").checked = !!p.featured;
     $("productError").classList.remove("show");
+    await loadCategoriesIntoSelect(p.category);
+    $("pCategory").value = p.category;
     $("productModal").classList.add("open");
   }
 
@@ -233,6 +246,123 @@
       if (currentTab === "inventory") await loadInventory();
     } catch (err) { showError(err.message); }
   }
+
+  /* ---------------- Categories ---------------- */
+  let editingCategory = null;
+  let categorySavedCb = null;
+  let deletingCategory = null;
+
+  async function loadCategories() {
+    try {
+      const cats = await api("/api/categories");
+      categoriesList = cats;
+      $("categoriesTable").innerHTML = cats.length
+        ? `<table><thead><tr><th>Image</th><th>Name</th><th>Slug</th><th>Products</th><th>Description</th><th style="min-width:170px">Actions</th></tr></thead><tbody>` +
+          cats.map(c => `<tr>
+            <td>${c.image ? `<img class="thumb" src="${esc(c.image)}" alt="">` : "—"}</td>
+            <td><span class="pname">${esc(c.name)}</span></td>
+            <td><code style="color:var(--admuted)">/${esc(c.slug)}</code></td>
+            <td><b>${c.product_count}</b></td>
+            <td style="max-width:280px">${esc(c.description || "—")}</td>
+            <td>
+              <button class="action-btn" data-act="edit" data-id="${c.id}">Edit</button>
+              <button class="action-btn danger" data-act="delete" data-id="${c.id}">Delete</button>
+            </td>
+          </tr>`).join("") + "</tbody></table>"
+        : '<div class="empty-row">No categories yet.</div>';
+    } catch (err) { showError(err.message); }
+  }
+
+  function openCategoryModal(cat, onSaved) {
+    editingCategory = cat || null;
+    categorySavedCb = onSaved || null;
+    $("categoryFormTitle").textContent = cat ? "Edit category" : "Add category";
+    $("categoryForm").reset();
+    if (cat) {
+      $("cName").value = cat.name;
+      $("cSlug").value = cat.slug || "";
+      $("cImage").value = cat.image || "";
+      $("cDescription").value = cat.description || "";
+    }
+    $("categoryError").classList.remove("show");
+    $("categoryModal").classList.add("open");
+  }
+
+  $("addCategoryBtn").addEventListener("click", () => openCategoryModal(null));
+  $("addCatQuick").addEventListener("click", () => openCategoryModal(null, saved => { loadCategoriesIntoSelect(saved.name); }));
+  $("categoryModalClose").addEventListener("click", () => $("categoryModal").classList.remove("open"));
+  $("categoryModalCancel").addEventListener("click", () => $("categoryModal").classList.remove("open"));
+  $("categoryModal").addEventListener("click", e => { if (e.target === $("categoryModal")) $("categoryModal").classList.remove("open"); });
+
+  $("categoryForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const errEl = $("categoryError");
+    errEl.classList.remove("show");
+    const body = {
+      name: $("cName").value.trim(),
+      slug: $("cSlug").value.trim(),
+      image: $("cImage").value.trim(),
+      description: $("cDescription").value.trim()
+    };
+    try {
+      const saved = editingCategory
+        ? await api("/api/admin/categories/" + editingCategory.id, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+        : await api("/api/admin/categories", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      $("categoryModal").classList.remove("open");
+      await loadCategories();
+      if (categorySavedCb) { categorySavedCb(saved); categorySavedCb = null; }
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.add("show");
+    }
+  });
+
+  function openCatDelete(cat) {
+    deletingCategory = cat;
+    $("catDeleteError").classList.remove("show");
+    const n = Number(cat.product_count) || 0;
+    const others = categoriesList.filter(c => c.id !== cat.id);
+    if (n > 0 && others.length) {
+      $("catDeleteMsg").textContent = `"${cat.name}" has ${n} product${n === 1 ? "" : "s"}. Choose a category to move them into before deleting it.`;
+      $("catMoveTo").innerHTML = others.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+      $("catMoveField").style.display = "block";
+    } else if (n > 0) {
+      $("catDeleteMsg").textContent = `"${cat.name}" has ${n} product${n === 1 ? "" : "s"} and no other categories exist to move them to. Move or delete its products first.`;
+      $("catMoveField").style.display = "none";
+    } else {
+      $("catDeleteMsg").textContent = `Delete "${cat.name}" permanently?`;
+      $("catMoveField").style.display = "none";
+    }
+    $("catDeleteModal").classList.add("open");
+  }
+
+  $("catDeleteConfirm").addEventListener("click", async () => {
+    if (!deletingCategory) return;
+    const errEl = $("catDeleteError");
+    errEl.classList.remove("show");
+    const n = Number(deletingCategory.product_count) || 0;
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (n > 0) {
+        const moveTo = $("catMoveTo").value;
+        if (!moveTo) { errEl.textContent = "Choose a category to move the products to."; errEl.classList.add("show"); return; }
+        await api(`/api/admin/categories/${deletingCategory.id}?to=${moveTo}`, { method: "DELETE", headers });
+      } else {
+        await api("/api/admin/categories/" + deletingCategory.id, { method: "DELETE", headers });
+      }
+      $("catDeleteModal").classList.remove("open");
+      deletingCategory = null;
+      await loadCategories();
+    } catch (err) { errEl.textContent = err.message; errEl.classList.add("show"); }
+  });
+  $("catDeleteModalClose").addEventListener("click", () => $("catDeleteModal").classList.remove("open"));
+  $("catDeleteCancel").addEventListener("click", () => $("catDeleteModal").classList.remove("open"));
+  $("catDeleteModal").addEventListener("click", e => { if (e.target === $("catDeleteModal")) $("catDeleteModal").classList.remove("open"); });
+
+  onTableAction("categoriesTable", (act, id) => {
+    if (act === "edit") { const c = categoriesList.find(x => x.id === Number(id)); if (c) openCategoryModal(c); }
+    if (act === "delete") { const c = categoriesList.find(x => x.id === Number(id)); if (c) openCatDelete(c); }
+  });
 
   /* ---------------- Orders ---------------- */
   async function loadOrders() {
@@ -368,11 +498,7 @@
           "</tbody></table>"
         : '<div class="empty-row">No sales yet.</div>';
 
-      const perf = (a.categoryPerformance || []).concat(
-        ["Clothing", "Shoes", "Jewelry", "Accessories", "Bags"]
-          .filter(c => !(a.categoryPerformance || []).some(x => x.category === c))
-          .map(c => ({ category: c, units: 0, revenue: 0 }))
-      );
+      const perf = a.categoryPerformance || [];
       const maxPerf = Math.max(1, ...perf.map(p => p.revenue));
       $("categoryPerf").innerHTML = `<div class="catperc">` + perf.map(p => `
         <div class="row"><b>${esc(p.category)}</b><div class="track"><div class="fill" style="width:${p.revenue ? Math.round((p.revenue / maxPerf) * 100) : 0}%"></div></div><div class="meta">${p.units} units · ${money(p.revenue)}</div></div>`).join("") + "</div>";
@@ -411,6 +537,7 @@
   const loaders = {
     dashboard: loadDashboard,
     products: loadProducts,
+    categories: loadCategories,
     orders: loadOrders,
     customers: loadCustomers,
     inventory: loadInventory,

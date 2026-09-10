@@ -36,13 +36,6 @@
     els.min().value = state.min;
     els.max().value = state.max;
 
-    els.cats().querySelectorAll("label").forEach(label => {
-      label.classList.toggle("active", label.querySelector("input").value === state.category);
-      if (state.category !== "All" && label.querySelector("input").value === state.category) {
-        label.querySelector("input").checked = true;
-      }
-    });
-
     let debounce;
     els.search().addEventListener("input", e => {
       clearTimeout(debounce);
@@ -58,14 +51,38 @@
     els.min().addEventListener("keydown", e => { if (e.key === "Enter") applyPrice(); });
     els.max().addEventListener("keydown", e => { if (e.key === "Enter") applyPrice(); });
 
+    renderCats();
+  }
+
+  function renderCats() {
     store.get("/api/categories").then(cats => {
-      const map = {};
-      cats.forEach(c => { map[c.category] = c.count; });
-      els.cats().querySelectorAll("small").forEach(small => {
-        const val = small.parentNode.querySelector("input").value;
-        small.textContent = map[val] != null ? `(${map[val]})` : "";
-      });
-    }).catch(() => {});
+      const cur = state.category;
+      const rows = cats.map(c => {
+        const count = Number(c.product_count) || 0;
+        return `<label class="${cur === c.name ? "active" : ""}">
+          <input type="radio" name="cat" value="${helpers.esc(c.name)}" ${cur === c.name ? "checked" : ""}>
+          <span>${helpers.esc(c.name)}</span><small>${count ? `(${count})` : ""}</small>
+        </label>`;
+      }).join("");
+      els.cats().innerHTML = `<label class="${cur === "All" ? "active" : ""}">
+          <input type="radio" name="cat" value="All" ${cur === "All" ? "checked" : ""}>
+          <span>All</span><small></small>
+        </label>` + rows;
+      els.cats().addEventListener("change", onCatChange);
+    }).catch(() => {
+      els.cats().addEventListener("change", onCatChange);
+    });
+  }
+
+  function onCatChange(e) {
+    const v = e.target.value;
+    if (!v) return;
+    state.category = v;
+    els.cats().querySelectorAll("label").forEach(l =>
+      l.classList.toggle("active", l.querySelector("input").value === v)
+    );
+    renderChips();
+    load();
   }
 
   function applyPrice() {

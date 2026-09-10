@@ -220,6 +220,14 @@ h1,h2,h3,h4{font-family:var(--font-display);font-weight:600;line-height:1.15;let
    Page banner (Shop, About, Contact, etc.)
    ========================================================= */
 .page-banner{background:linear-gradient(120deg,#2b231d,#3d2f24 60%,#54392a);color:#fff;padding:64px 0}
+.cat-banner{position:relative;background-color:#2b231d;background-size:cover;background-position:center;color:#fff;padding:70px 0}
+.cat-banner::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(28,25,23,.86) 0,rgba(28,25,23,.55) 60%,rgba(28,25,23,.25));pointer-events:none}
+.cat-banner-inner{position:relative;z-index:1}
+.cat-banner h1{font-size:clamp(34px,5vw,52px);color:#fff}
+.cat-banner .breadcrumb a:hover{color:#fff}
+.cat-desc{color:#e7d9cc;max-width:680px;margin-top:10px;font-size:16.5px}
+.cat-meta{display:inline-block;margin-top:16px;font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#fff;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.28);padding:7px 14px;border-radius:999px}
+.pb-narrow{padding:44px 0}
 .page-banner h1{font-size:clamp(34px,5vw,52px);color:#fff}
 .page-banner p{color:#ddcfc2;max-width:620px;margin-top:10px;font-size:16.5px}
 .breadcrumb{font-size:13px;color:#b3a8a0;margin-bottom:10px}

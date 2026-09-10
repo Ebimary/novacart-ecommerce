@@ -17,7 +17,6 @@ const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, "novacart.db")
 const DELIVERY_FEE = 2500;
 const FREE_DELIVERY_THRESHOLD = 100000;
 const ORDER_STATUSES = ["Pending", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled"];
-const CATEGORIES = ["Clothing", "Shoes", "Jewelry", "Accessories", "Bags"];
 
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "1mb" }));
@@ -80,6 +79,15 @@ CREATE TABLE IF NOT EXISTS contact_messages (
   subject TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE, slug TEXT NOT NULL UNIQUE,
+  description TEXT DEFAULT '', image TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_name_lower ON categories(LOWER(name));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_slug_lower ON categories(LOWER(slug));
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
@@ -96,6 +104,7 @@ ensureColumn("products", "featured", "featured INTEGER NOT NULL DEFAULT 0");
 ensureColumn("products", "rating", "rating REAL NOT NULL DEFAULT 4.5");
 ensureColumn("products", "is_active", "is_active INTEGER NOT NULL DEFAULT 1");
 ensureColumn("products", "created_at", "created_at TEXT DEFAULT CURRENT_TIMESTAMP");
+ensureColumn("products", "category_id", "category_id INTEGER REFERENCES categories(id)");
 ensureColumn("orders", "order_number", "order_number TEXT");
 ensureColumn("orders", "phone", "phone TEXT DEFAULT ''");
 ensureColumn("orders", "address", "address TEXT DEFAULT ''");
@@ -107,11 +116,62 @@ ensureColumn("orders", "delivery_fee", "delivery_fee INTEGER DEFAULT 0");
 ensureColumn("orders", "payment_method", "payment_method TEXT DEFAULT 'Cash on Delivery'");
 ensureColumn("orders", "payment_status", "payment_status TEXT DEFAULT 'Pending'");
 
+db.exec("CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id)");
+
 /* Normalise the legacy "Clothes" category and backfill order numbers. */
 db.prepare("UPDATE products SET category=? WHERE category IN (?, ?)")
   .run("Clothing", "Clothes", "CLOTHES");
 db.exec(`UPDATE orders SET order_number = 'NC-' || printf('%06d', id)
          WHERE order_number IS NULL OR order_number = ''`);
+
+/* Seed default categories. Idempotent: safe to run on every boot and never
+   duplicates categories that already exist (matches name or slug). */
+const DEFAULT_CATEGORIES = [
+  { name: "Clothing", slug: "clothing", description: "Tailored and everyday essentials.", image: "" },
+  { name: "Shoes", slug: "shoes", description: "From sneakers to statement styles.", image: "" },
+  { name: "Jewelry", slug: "jewelry", description: "Pieces that finish every outfit.", image: "" },
+  { name: "Accessories", slug: "accessories", description: "Watches, belts and finishing touches.", image: "" },
+  { name: "Bags", slug: "bags", description: "Carry everyday in style.", image: "" }
+];
+{
+  const insertCat = db.prepare(
+    "INSERT OR IGNORE INTO categories(name, slug, description, image) VALUES(?, ?, ?, ?)"
+  );
+  const catByKey = new Map(
+    db.prepare("SELECT id, name, slug FROM categories").all()
+      .flatMap(r => [[r.name.toLowerCase(), r.id], [r.slug.toLowerCase(), r.id]])
+  );
+  for (const c of DEFAULT_CATEGORIES) {
+    if (catByKey.has(c.name.toLowerCase()) || catByKey.has(c.slug.toLowerCase())) continue;
+    insertCat.run(c.name, c.slug, c.description, c.image);
+    const row = db.prepare("SELECT id FROM categories WHERE LOWER(name) = LOWER(?)").get(c.name);
+    catByKey.set(c.name.toLowerCase(), row.id);
+    catByKey.set(c.slug.toLowerCase(), row.id);
+  }
+}
+
+/* Relational migration: point existing products at categories by id. Rows that
+   reference a category not in the table are auto-created instead of lost. */
+{
+  const findByName = db.prepare("SELECT id FROM categories WHERE LOWER(name) = LOWER(?)");
+  const findBySlug = db.prepare("SELECT id FROM categories WHERE LOWER(slug) = LOWER(?)");
+  const insertCat = db.prepare("INSERT OR IGNORE INTO categories(name, slug) VALUES(?, ?)");
+  const setCat = db.prepare("UPDATE products SET category_id = ? WHERE id = ?");
+  const rows = db.prepare("SELECT id, category FROM products WHERE category_id IS NULL").all();
+  const tx = db.transaction(rows => {
+    for (const r of rows) {
+      const name = String(r.category || "").trim();
+      if (!name) continue;
+      let cat = findByName.get(name) || findBySlug.get(name);
+      if (!cat) {
+        insertCat.run(name, slugify(name));
+        cat = findByName.get(name) || findBySlug.get(name);
+      }
+      if (cat) setCat.run(cat.id, r.id);
+    }
+  });
+  tx(rows);
+}
 
 /* Seed the catalog only when the products table is empty. */
 const productCount = db.prepare("SELECT COUNT(*) AS n FROM products").get().n;
@@ -127,9 +187,15 @@ if (!productCount) {
     ["Structured Handbag", "Bags", 98000, "https://images.unsplash.com/photo-1584917865442-de89df76afd3?auto=format&fit=crop&w=900&q=85", 0, "Structured everyday handbag.", 1, 4.6]
   ];
   const insert = db.prepare(
-    "INSERT INTO products(name,category,price,image,stock,description,featured,rating) VALUES(?,?,?,?,?,?,?,?)"
+    "INSERT INTO products(name,category,category_id,price,image,stock,description,featured,rating) VALUES(?,?,?,?,?,?,?,?,?)"
   );
-  const tx = db.transaction(rows => rows.forEach(r => insert.run(...r)));
+  const catFor = db.prepare("SELECT id FROM categories WHERE LOWER(name) = LOWER(?)");
+  const tx = db.transaction(rows => {
+    for (const r of rows) {
+      const cat = catFor.get(r[1]);
+      insert.run(r[0], r[1], cat ? cat.id : null, ...r.slice(2));
+    }
+  });
   tx(seed);
 }
 
@@ -249,14 +315,23 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validateProduct(body) {
   const errors = [];
   const name = String(body.name || "").trim();
-  const category = String(body.category || "").trim();
   const price = Number(body.price);
   const stock = Number(body.stock);
   const image = String(body.image || "").trim();
   const description = String(body.description || "").trim();
 
   if (name.length < 2 || name.length > 120) errors.push("Product name must be between 2 and 120 characters.");
-  if (!CATEGORIES.includes(category)) errors.push(`Category must be one of: ${CATEGORIES.join(", ")}.`);
+
+  const categoryId = Number(body.category_id);
+  let category = null;
+  if (Number.isInteger(categoryId) && categoryId > 0) {
+    category = db.prepare("SELECT id, name, slug FROM categories WHERE id = ?").get(categoryId);
+  } else if (String(body.category || "").trim()) {
+    category = db.prepare("SELECT id, name, slug FROM categories WHERE LOWER(name) = LOWER(?)")
+      .get(String(body.category).trim());
+  }
+  if (!category) errors.push("Please select a valid category.");
+
   if (!Number.isFinite(price) || !Number.isInteger(price) || price < 0 || price > 100000000)
     errors.push("Price must be a whole number between 0 and ₦100,000,000.");
   if (!Number.isInteger(stock) || stock < 0 || stock > 100000)
@@ -267,7 +342,53 @@ function validateProduct(body) {
   const featured = body.featured ? 1 : 0;
   const rating = Number(body.rating);
   const rate = Number.isFinite(rating) && rating >= 0 && rating <= 5 ? rating : 4.5;
-  return { errors, values: { name, category, price, stock, image, description, featured, rating: rate } };
+  return {
+    errors,
+    values: {
+      name, price, stock, image, description, featured, rating: rate,
+      category_id: category ? category.id : null,
+      category: category ? category.name : String(body.category || "").trim()
+    }
+  };
+}
+
+function slugify(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
+function validateCategory(body, excludeId) {
+  const errors = [];
+  const name = String(body.name || "").trim();
+  const rawSlug = String(body.slug || "").trim();
+  const slug = rawSlug ? rawSlug.toLowerCase() : slugify(name);
+  const description = String(body.description || "").trim();
+  const image = String(body.image || "").trim();
+
+  if (!name) errors.push("Category name is required.");
+  else if (name.length > 60) errors.push("Category name must be 60 characters or fewer.");
+
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
+    errors.push("Slug may only contain lowercase letters, numbers and dashes (e.g. \"home-and-living\").");
+  }
+
+  if (name && db.prepare(
+    `SELECT id FROM categories WHERE LOWER(name) = LOWER(?) AND id != COALESCE(?, -1)`
+  ).get(name, excludeId || -1)) {
+    errors.push("A category with this name already exists.");
+  }
+  if (slug && db.prepare(
+    `SELECT id FROM categories WHERE LOWER(slug) = LOWER(?) AND id != COALESCE(?, -1)`
+  ).get(slug, excludeId || -1)) {
+    errors.push("This slug is already in use.");
+  }
+  if (description.length > 500) errors.push("Description must be 500 characters or fewer.");
+  if (image && !/^https?:\/\/\S+$/i.test(image)) errors.push("Category image must be a valid http(s) URL.");
+  return { errors, values: { name, slug, description, image } };
 }
 
 /* ------------------------------------------------------------------ */
@@ -289,72 +410,111 @@ function money(n) {
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
 app.get("/api/config", (req, res) => {
-  res.json({ currency: "NGN", deliveryFee: DELIVERY_FEE, freeDeliveryThreshold: FREE_DELIVERY_THRESHOLD, categories: CATEGORIES });
+  const cats = db.prepare("SELECT name FROM categories ORDER BY id ASC").all().map(c => c.name);
+  res.json({ currency: "NGN", deliveryFee: DELIVERY_FEE, freeDeliveryThreshold: FREE_DELIVERY_THRESHOLD, categories: cats });
 });
 
 app.get("/api/categories", (req, res) => {
-  const rows = db.prepare(
-    "SELECT category, COUNT(*) AS count FROM products WHERE is_active = 1 GROUP BY category ORDER BY count DESC"
-  ).all();
+  const slug = String(req.query.slug || "").trim();
+  let rows;
+  if (slug) {
+    rows = db.prepare(`
+      SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) AS product_count
+      FROM categories c WHERE LOWER(c.slug) = LOWER(?) LIMIT 1
+    `).all(slug);
+  } else {
+    rows = db.prepare(`
+      SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) AS product_count
+      FROM categories c ORDER BY c.id ASC
+    `).all();
+  }
   res.json(rows);
 });
 
+app.get("/api/categories/:id", (req, res) => {
+  const category = db.prepare(`
+    SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) AS product_count
+    FROM categories c WHERE c.id = ?
+  `).get(Number(req.params.id));
+  if (!category) return res.status(404).json({ error: "Category not found." });
+  res.json(category);
+});
+
+/* Shared product projection so every product row includes its category
+   without a per-product API call. */
+const P = `
+  SELECT p.id, p.name, p.image, p.price, p.stock, p.description, p.featured, p.rating,
+    p.is_active, p.created_at, p.category_id,
+    c.name AS category, c.slug AS category_slug
+  FROM products p LEFT JOIN categories c ON c.id = p.category_id`;
+
 app.get("/api/products", (req, res) => {
-  const { q, category, sort, min, max, featured, limit } = req.query;
-  const where = ["is_active = 1"];
+  const { q, category, slug, category_id, sort, min, max, featured, limit } = req.query;
+  const where = ["p.is_active = 1"];
   const params = [];
 
-  if (category && category !== "All" && CATEGORIES.includes(category)) {
-    where.push("category = ?");
-    params.push(category);
+  if (category && category !== "All") {
+    where.push("(c.name = ? OR c.slug = ?)");
+    params.push(category, category);
+  }
+  if (slug) {
+    where.push("c.slug = ?");
+    params.push(slug);
+  }
+  const catId = Number(category_id);
+  if (Number.isInteger(catId) && catId > 0) {
+    where.push("p.category_id = ?");
+    params.push(catId);
   }
   if (q) {
-    where.push("(name LIKE ? OR category LIKE ? OR description LIKE ?)");
+    where.push("(p.name LIKE ? OR c.name LIKE ? OR p.description LIKE ?)");
     params.push(`%${q}%`, `%${q}%`, `%${q}%`);
   }
   const minN = Number(min);
-  if (Number.isFinite(minN) && minN >= 0) { where.push("price >= ?"); params.push(Math.round(minN)); }
+  if (Number.isFinite(minN) && minN >= 0) { where.push("p.price >= ?"); params.push(Math.round(minN)); }
   const maxN = Number(max);
-  if (Number.isFinite(maxN) && maxN > 0) { where.push("price <= ?"); params.push(Math.round(maxN)); }
-  if (featured === "1") where.push("featured = 1");
+  if (Number.isFinite(maxN) && maxN > 0) { where.push("p.price <= ?"); params.push(Math.round(maxN)); }
+  if (featured === "1") where.push("p.featured = 1");
 
   const sortMap = {
-    newest: "id DESC",
-    price_asc: "price ASC, id DESC",
-    price_desc: "price DESC, id DESC",
-    popular: "(SELECT COALESCE(SUM(quantity),0) FROM order_items WHERE product_id = products.id) DESC, id DESC"
+    newest: "p.id DESC",
+    price_asc: "p.price ASC, p.id DESC",
+    price_desc: "p.price DESC, p.id DESC",
+    popular: "(SELECT COALESCE(SUM(quantity),0) FROM order_items WHERE product_id = p.id) DESC, p.id DESC"
   };
-  const orderBy = sortMap[String(sort || "newest").toLowerCase()] || "featured DESC, id DESC";
+  const orderBy = sortMap[String(sort || "newest").toLowerCase()] || "p.featured DESC, p.id DESC";
   const take = Math.min(Math.max(Number(limit) || 100, 1), 200);
 
-  const sql = `SELECT * FROM products WHERE ${where.join(" AND ")} ORDER BY ${orderBy} LIMIT ${take}`;
+  const sql = `${P} WHERE ${where.join(" AND ")} ORDER BY ${orderBy} LIMIT ${take}`;
   res.json(db.prepare(sql).all(...params));
 });
 
+app.get("/api/products/:id/related", (req, res) => {
+  const product = db.prepare(P + " WHERE p.id = ?").get(req.params.id);
+  if (!product) return res.json([]);
+  const rows = db.prepare(
+    `${P} WHERE p.is_active = 1 AND p.category_id = ? AND p.id != ? ORDER BY p.featured DESC, p.id DESC LIMIT 4`
+  ).all(product.category_id, product.id);
+  res.json(rows);
+});
+
 app.get("/api/products/:id", (req, res) => {
-  const product = db.prepare("SELECT * FROM products WHERE id = ? AND is_active = 1").get(req.params.id);
+  const product = db.prepare(P + " WHERE p.id = ? AND p.is_active = 1").get(req.params.id);
   if (!product) return res.status(404).json({ error: "Product not found." });
   res.json(product);
 });
 
-app.get("/api/products/:id/related", (req, res) => {
-  const product = db.prepare("SELECT * FROM products WHERE id = ?").get(req.params.id);
-  if (!product) return res.json([]);
-  const rows = db.prepare(
-    "SELECT * FROM products WHERE is_active = 1 AND category = ? AND id != ? ORDER BY featured DESC, id DESC LIMIT 4"
-  ).all(product.category, product.id);
-  res.json(rows);
-});
-
 app.get("/api/home", (req, res) => {
-  const featured = db.prepare("SELECT * FROM products WHERE is_active = 1 AND featured = 1 ORDER BY id DESC LIMIT 8").all();
-  const categories = db.prepare(
-    "SELECT category, COUNT(*) AS count FROM products WHERE is_active = 1 GROUP BY category"
-  ).all();
+  const featured = db.prepare(`${P} WHERE p.is_active = 1 AND p.featured = 1 ORDER BY p.id DESC LIMIT 8`).all();
+  const categories = db.prepare(`
+    SELECT c.id, c.name, c.slug, c.description, c.image,
+      (SELECT COUNT(*) FROM products WHERE category_id = c.id AND is_active = 1) AS count
+    FROM categories c ORDER BY c.id ASC`).all();
   const bestsellers = db.prepare(`
-    SELECT p.id, p.name, p.image, p.price, p.rating, p.stock, p.category,
+    SELECT p.id, p.name, p.image, p.price, p.rating, p.stock, c.name AS category, c.slug AS category_slug,
       COALESCE(SUM(oi.quantity), 0) AS sold
     FROM products p
+    LEFT JOIN categories c ON c.id = p.category_id
     LEFT JOIN order_items oi ON oi.product_id = p.id
     LEFT JOIN orders o ON o.id = oi.order_id AND o.status != 'Cancelled'
     WHERE p.is_active = 1
@@ -523,11 +683,12 @@ app.get("/api/admin/analytics", requireAdmin, (req, res) => {
     GROUP BY p.id ORDER BY sold DESC LIMIT 8`).all();
 
   const categoryPerformance = db.prepare(`
-    SELECT p.category, COALESCE(SUM(oi.quantity), 0) AS units, COALESCE(SUM(oi.price * oi.quantity), 0) AS revenue
-    FROM products p
+    SELECT c.name AS category, COALESCE(SUM(oi.quantity), 0) AS units, COALESCE(SUM(oi.price * oi.quantity), 0) AS revenue
+    FROM categories c
+    LEFT JOIN products p ON p.category_id = c.id AND p.is_active = 1
     LEFT JOIN order_items oi ON oi.product_id = p.id
     LEFT JOIN orders o ON o.id = oi.order_id AND o.status != 'Cancelled'
-    GROUP BY p.category ORDER BY revenue DESC`).all();
+    GROUP BY c.id, c.name ORDER BY revenue DESC`).all();
 
   const daily = db.prepare(`
     SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS orders,
@@ -568,7 +729,9 @@ app.put("/api/admin/orders/:id/status", requireAdmin, sameOrigin, (req, res) => 
 });
 
 app.get("/api/admin/products", requireAdmin, (req, res) => {
-  res.json(db.prepare("SELECT * FROM products ORDER BY id DESC").all());
+  res.json(db.prepare(
+    "SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p LEFT JOIN categories c ON c.id = p.category_id ORDER BY p.id DESC"
+  ).all());
 });
 
 app.post("/api/admin/products", requireAdmin, sameOrigin, (req, res) => {
@@ -577,9 +740,11 @@ app.post("/api/admin/products", requireAdmin, sameOrigin, (req, res) => {
   if (db.prepare("SELECT id FROM products WHERE LOWER(name) = ?").get(values.name.toLowerCase()))
     return res.status(409).json({ error: "A product with this name already exists." });
   const info = db.prepare(
-    "INSERT INTO products(name, category, price, image, stock, description, featured, rating) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
-  ).run(values.name, values.category, values.price, values.image, values.stock, values.description, values.featured, values.rating);
-  res.status(201).json(db.prepare("SELECT * FROM products WHERE id = ?").get(info.lastInsertRowid));
+    "INSERT INTO products(name, category, category_id, price, image, stock, description, featured, rating) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(values.name, values.category, values.category_id, values.price, values.image, values.stock, values.description, values.featured, values.rating);
+  res.status(201).json(db.prepare(
+    "SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p LEFT JOIN categories c ON c.id = p.category_id WHERE p.id = ?"
+  ).get(info.lastInsertRowid));
 });
 
 app.put("/api/admin/products/:id", requireAdmin, sameOrigin, (req, res) => {
@@ -591,14 +756,90 @@ app.put("/api/admin/products/:id", requireAdmin, sameOrigin, (req, res) => {
     .get(values.name.toLowerCase(), existing.id))
     return res.status(409).json({ error: "A product with this name already exists." });
   db.prepare(
-    "UPDATE products SET name = ?, category = ?, price = ?, image = ?, stock = ?, description = ?, featured = ?, rating = ? WHERE id = ?"
-  ).run(values.name, values.category, values.price, values.image, values.stock, values.description, values.featured, values.rating, existing.id);
-  res.json(db.prepare("SELECT * FROM products WHERE id = ?").get(existing.id));
+    "UPDATE products SET name = ?, category = ?, category_id = ?, price = ?, image = ?, stock = ?, description = ?, featured = ?, rating = ? WHERE id = ?"
+  ).run(values.name, values.category, values.category_id, values.price, values.image, values.stock, values.description, values.featured, values.rating, existing.id);
+  res.json(db.prepare(
+    "SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p LEFT JOIN categories c ON c.id = p.category_id WHERE p.id = ?"
+  ).get(existing.id));
 });
 
 app.delete("/api/admin/products/:id", requireAdmin, sameOrigin, (req, res) => {
   const info = db.prepare("DELETE FROM products WHERE id = ?").run(req.params.id);
   if (!info.changes) return res.status(404).json({ error: "Product not found." });
+  res.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Category management (admin protected)                              */
+/* ------------------------------------------------------------------ */
+function categoryOrNull(id) {
+  return db.prepare("SELECT * FROM categories WHERE id = ?").get(Number(id));
+}
+
+app.post("/api/admin/categories", requireAdmin, sameOrigin, (req, res) => {
+  const { errors, values } = validateCategory(req.body);
+  if (errors.length) return res.status(400).json({ error: errors.join(" ") });
+  const info = db.prepare(
+    "INSERT INTO categories(name, slug, description, image) VALUES(?, ?, ?, ?)"
+  ).run(values.name, values.slug, values.description, values.image);
+  res.status(201).json(db.prepare(
+    `SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) AS product_count
+     FROM categories c WHERE c.id = ?`
+  ).get(info.lastInsertRowid));
+});
+
+app.put("/api/admin/categories/:id", requireAdmin, sameOrigin, (req, res) => {
+  const existing = categoryOrNull(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Category not found." });
+  const { errors, values } = validateCategory(req.body, existing.id);
+  if (errors.length) return res.status(400).json({ error: errors.join(" ") });
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      "UPDATE categories SET name = ?, slug = ?, description = ?, image = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    ).run(values.name, values.slug, values.description, values.image, existing.id);
+    /* Keep the denormalised product category label in sync so every product
+       in the renamed category continues to display its category correctly. */
+    db.prepare("UPDATE products SET category = ? WHERE category_id = ?")
+      .run(values.name, existing.id);
+  });
+  tx();
+
+  res.json(db.prepare(
+    `SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) AS product_count
+     FROM categories c WHERE c.id = ?`
+  ).get(existing.id));
+});
+
+app.delete("/api/admin/categories/:id", requireAdmin, sameOrigin, (req, res) => {
+  const existing = categoryOrNull(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Category not found." });
+
+  const productCount = db.prepare(
+    "SELECT COUNT(*) AS n FROM products WHERE category_id = ?"
+  ).get(existing.id).n;
+
+  if (productCount > 0) {
+    const moveTo = Number(req.query.to);
+    if (!Number.isInteger(moveTo) || moveTo <= 0 || moveTo === existing.id) {
+      return res.status(409).json({
+        error: `This category contains ${productCount} product${productCount === 1 ? "" : "s"}. Move or remove ${productCount === 1 ? "it" : "them"} before deleting the category.`,
+        count: productCount
+      });
+    }
+    const target = categoryOrNull(moveTo);
+    if (!target) return res.status(400).json({ error: "Please choose a valid category to move products to." });
+
+    const tx = db.transaction(() => {
+      db.prepare("UPDATE products SET category_id = ?, category = ? WHERE category_id = ?")
+        .run(target.id, target.name, existing.id);
+      db.prepare("DELETE FROM categories WHERE id = ?").run(existing.id);
+    });
+    tx();
+    return res.json({ ok: true, moved: productCount });
+  }
+
+  db.prepare("DELETE FROM categories WHERE id = ?").run(existing.id);
   res.json({ ok: true });
 });
 
@@ -632,6 +873,16 @@ app.get("/admin/login", (req, res) => {
 });
 app.get("/admin", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "admin", "dashboard.html"));
+});
+
+/* ------------------------------------------------------------------ */
+/*  Category pages                                                     */
+/* ------------------------------------------------------------------ */
+app.get("/category/:slug", (req, res) => {
+  const category = db.prepare("SELECT id, name, slug FROM categories WHERE LOWER(slug) = LOWER(?)")
+    .get(req.params.slug);
+  if (!category) return res.status(404).sendFile(path.join(__dirname, "public", "404.html"));
+  res.sendFile(path.join(__dirname, "public", "category.html"));
 });
 
 /* ------------------------------------------------------------------ */

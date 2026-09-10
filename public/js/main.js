@@ -228,6 +228,8 @@
   }
 
   function initCategoryCards() {
+    /* Fallback imagery for the homepage "Shop by category" grid when the
+       category has no custom image yet. */
     document.querySelectorAll("[data-cat-card]").forEach(el => {
       const cat = el.dataset.catCard;
       const meta = CATEGORY_META[cat] || {};
@@ -235,6 +237,51 @@
       el.innerHTML = `<img src="${img}" alt="${helpers.esc(cat)} collection" loading="lazy">` +
         `<span class="cat-label"><b>${helpers.esc(cat)}</b><small>${helpers.esc(meta.blurb || "Shop the collection")}</small></span>`;
     });
+  }
+
+  function catCardHTML(c) {
+    const meta = CATEGORY_META[c.name] || {};
+    const img = c.image || meta.image || "https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=700&q=80";
+    const n = Number(c.product_count) || 0;
+    const sub = n > 0
+      ? `${n} product${n === 1 ? "" : "s"}`
+      : (c.description || meta.blurb || "Shop the collection");
+    return `<a class="cat-card" href="/category/${encodeURIComponent(c.slug)}" aria-label="Shop ${helpers.esc(c.name)}">
+      <img src="${helpers.esc(img)}" alt="${helpers.esc(c.name)} collection" loading="lazy">
+      <span class="cat-label"><b>${helpers.esc(c.name)}</b><small>${helpers.esc(sub)}</small></span>
+    </a>`;
+  }
+
+  function fillCategoryLinks(cats) {
+    if (!cats || !cats.length) return;
+    const links = cats.map(c =>
+      `<a href="/category/${encodeURIComponent(c.slug)}">${helpers.esc(c.name)}</a>`
+    ).join("");
+
+    const navDrop = document.querySelector(".nav-item.has-drop .dropdown");
+    if (navDrop) navDrop.innerHTML = links;
+
+    const mmCats = document.querySelector(".mm-cats");
+    if (mmCats) mmCats.innerHTML = links;
+
+    document.querySelectorAll(".footer-col").forEach(col => {
+      const h4 = col.querySelector("h4");
+      if (h4 && /^categories$/i.test(h4.textContent.trim())) {
+        col.querySelectorAll("a").forEach(a => a.remove());
+        h4.insertAdjacentHTML("afterend", links);
+      }
+    });
+  }
+
+  function initDynamicCategories() {
+    store.get("/api/categories")
+      .then(cats => {
+        window.Nova.categories = cats;
+        fillCategoryLinks(cats);
+        const catGrid = document.getElementById("catGrid");
+        if (catGrid && cats.length) catGrid.innerHTML = cats.map(catCardHTML).join("");
+      })
+      .catch(() => { /* keep static/fallback markup */ });
   }
 
   function initFooterYear() {
@@ -247,8 +294,9 @@
     initHeader();
     initCategoryCards();
     initFooterYear();
+    initDynamicCategories();
     store.configPromise().catch(() => {});
   });
 
-  window.Nova = { store, cart, toast, helpers, cardHTML, CATEGORY_META };
+  window.Nova = { store, cart, toast, helpers, cardHTML, CATEGORY_META, catCardHTML, categories: null };
 })();

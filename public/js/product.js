@@ -105,7 +105,7 @@
       .then(p => {
         product = p;
         document.title = `${p.name} — NovaCart`;
-        crumbCat().innerHTML = `<a href="/shop">${helpers.esc(p.category)}</a>`;
+        crumbCat().innerHTML = `<a href="/category/${encodeURIComponent(p.category_slug || "")}">${helpers.esc(p.category)}</a>`;
         root().innerHTML = markup(p);
         bindActions();
         loadRelated();
