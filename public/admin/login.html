@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin Login — NovaCart</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/admin/css/admin.css">
+</head>
+<body class="login-page">
+<main class="login-wrap">
+  <form class="login-card" id="loginForm" novalidate>
+    <a class="login-brand" href="/">Nova<span>Cart</span></a>
+    <p class="login-eyebrow">Administrator access</p>
+    <h1>Sign in</h1>
+    <p class="login-sub">Enter your administrator credentials to continue.</p>
+    <p class="login-error" id="loginError"></p>
+    <div class="lfield">
+      <label for="loginEmail">Email</label>
+      <input id="loginEmail" type="email" autocomplete="username" placeholder="admin@novacart.com" required>
+    </div>
+    <div class="lfield">
+      <label for="loginPassword">Password</label>
+      <input id="loginPassword" type="password" autocomplete="current-password" placeholder="••••••••" required>
+    </div>
+    <button class="login-btn" id="loginBtn" type="submit">Login</button>
+    <a class="login-back" href="/">&larr; Back to store</a>
+  </form>
+</main>
+<script src="/admin/js/auth.js"></script>
+</body>
+</html>

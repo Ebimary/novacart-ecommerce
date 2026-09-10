@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin Dashboard — NovaCart</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/admin/css/admin.css">
+</head>
+<body>
+<div class="admin-shell">
+  <aside class="sidebar">
+    <div class="side-brand"><a href="/admin">Nova<span>Cart</span></a><small>Admin</small></div>
+    <nav class="side-nav" aria-label="Admin navigation">
+      <a href="#" class="side-link active" data-tab="dashboard">Dashboard</a>
+      <a href="#" class="side-link" data-tab="products">Products</a>
+      <a href="#" class="side-link" data-tab="orders">Orders</a>
+      <a href="#" class="side-link" data-tab="customers">Customers</a>
+      <a href="#" class="side-link" data-tab="inventory">Inventory</a>
+      <a href="#" class="side-link" data-tab="analytics">Analytics</a>
+      <a href="#" class="side-link" data-tab="settings">Settings</a>
+    </nav>
+    <div class="side-foot">
+      <a class="side-link" href="/" target="_blank" rel="noopener">View store ↗</a>
+      <button class="side-link" id="logoutBtn">Logout</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="topbar">
+      <div>
+        <p class="topbar-eyebrow" id="adminEmail">Administration</p>
+        <h1 id="pageTitle">Dashboard</h1>
+      </div>
+      <div class="topbar-actions">
+        <button class="tbtn" id="navToggle">☰</button>
+        <a class="tlink" href="/" target="_blank" rel="noopener">Open store</a>
+      </div>
+    </header>
+
+    <p class="dash-error" id="dashError"></p>
+
+    <!-- DASHBOARD -->
+    <section id="tab-dashboard" class="tab">
+      <div class="stat-grid">
+        <div class="stat-card"><span>Revenue</span><b id="statRevenue">₦0</b><small>Gross, excl. cancelled</small></div>
+        <div class="stat-card"><span>Orders</span><b id="statOrders">0</b><small>All time</small></div>
+        <div class="stat-card"><span>Customers</span><b id="statCustomers">0</b><small>Distinct buyers</small></div>
+        <div class="stat-card"><span>Products</span><b id="statProducts">0</b><small>In catalog</small></div>
+        <div class="stat-card warn"><span>Low stock</span><b id="statLow">0</b><small>&lt; 10 units</small></div>
+        <div class="stat-card danger"><span>Out of stock</span><b id="statOut">0</b><small>Unavailable</small></div>
+      </div>
+
+      <div class="panel-grid">
+        <div class="panel">
+          <div class="panel-head"><h2>Recent orders</h2><a class="plink" href="#" data-goto="orders">View all</a></div>
+          <div id="recentOrders" class="table-wrap"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Orders by status</h2></div>
+          <div id="statusBars"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRODUCTS -->
+    <section id="tab-products" class="tab" style="display:none">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Catalog</h2>
+          <button class="btn-accent admin-active" id="addProductBtn">+ Add product</button>
+        </div>
+        <div id="productsTable" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- ORDERS -->
+    <section id="tab-orders" class="tab" style="display:none">
+      <div class="panel">
+        <div class="panel-head"><h2>Orders</h2></div>
+        <div id="ordersTable" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- CUSTOMERS -->
+    <section id="tab-customers" class="tab" style="display:none">
+      <div class="panel">
+        <div class="panel-head"><h2>Customers</h2></div>
+        <div id="customersTable" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- INVENTORY -->
+    <section id="tab-inventory" class="tab" style="display:none">
+      <div class="panel">
+        <div class="panel-head"><h2>Inventory</h2></div>
+        <div id="inventoryTable" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- ANALYTICS -->
+    <section id="tab-analytics" class="tab" style="display:none">
+      <div class="panel-grid">
+        <div class="panel">
+          <div class="panel-head"><h2>Sales overview (14 days)</h2></div>
+          <div id="salesChart" class="chart-bars"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Best sellers</h2></div>
+          <div id="bestSellers" class="table-wrap"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Category performance</h2></div>
+        <div id="categoryPerf" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="tab-settings" class="tab" style="display:none">
+      <div class="panel form-panel">
+        <div class="panel-head"><h2>Change admin password</h2></div>
+        <form id="passwordForm" class="setting-form">
+          <p class="form-error" id="passwordError" style="display:none"></p>
+          <div class="sfield"><label for="currentPassword">Current password</label><input type="password" id="currentPassword" autocomplete="current-password" required></div>
+          <div class="sfield"><label for="newPassword">New password (min 8 characters)</label><input type="password" id="newPassword" autocomplete="new-password" required minlength="8"></div>
+          <button class="btn-accent admin-active" type="submit">Update password</button>
+          <p class="form-msg" id="passwordMsg"></p>
+        </form>
+        <p style="color:var(--admuted);font-size:13.5px;margin-top:28px;padding-top:20px;border-top:1px solid var(--adline)">
+          Default local credentials are documented in the README. In production they are overridden by the <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> environment variables on Render.
+        </p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Product modal -->
+<div class="modal" id="productModal">
+  <form class="modal-card" id="productForm" novalidate>
+    <button type="button" class="modal-x" id="productModalClose" aria-label="Close">&times;</button>
+    <h2 id="productFormTitle">Add product</h2>
+    <p class="form-error" id="productError" style="display:none"></p>
+    <div class="mfield"><label for="pName">Product name</label><input id="pName" type="text" required></div>
+    <div class="mfield"><label for="pCategory">Category</label>
+      <select id="pCategory" required>
+        <option value="">Select category…</option>
+        <option>Clothing</option>
+        <option>Shoes</option>
+        <option>Jewelry</option>
+        <option>Accessories</option>
+        <option>Bags</option>
+      </select>
+    </div>
+    <div class="mfields-2">
+      <div class="mfield"><label for="pPrice">Price (₦)</label><input id="pPrice" type="number" min="0" step="1" required></div>
+      <div class="mfield"><label for="pStock">Stock</label><input id="pStock" type="number" min="0" step="1" required></div>
+    </div>
+    <div class="mfield"><label for="pImage">Image URL</label><input id="pImage" type="url" placeholder="https://…" required></div>
+    <div class="mfield"><label for="pDescription">Description</label><textarea id="pDescription" rows="3"></textarea></div>
+    <div class="mfield"><label for="pRating">Rating (0–5)</label><input id="pRating" type="number" min="0" max="5" step="0.1" value="4.5"></div>
+    <label class="mcheck"><input type="checkbox" id="pFeatured"> Mark as featured</label>
+    <div class="mbuttons">
+      <button type="button" class="tbtn" id="productModalCancel">Cancel</button>
+      <button class="btn-accent admin-active" type="submit" id="productModalSave">Save product</button>
+    </div>
+  </form>
+</div>
+
+<!-- Single order detail modal -->
+<div class="modal" id="orderModal">
+  <div class="modal-card">
+    <button type="button" class="modal-x" id="orderModalClose" aria-label="Close">&times;</button>
+    <div id="orderModalBody"></div>
+  </div>
+</div>
+
+<script src="/admin/js/admin.js"></script>
+</body>
+</html>

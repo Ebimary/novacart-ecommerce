@@ -1,9 +1,0 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NovaCart Admin</title><link rel="stylesheet" href="admin.css"></head><body>
-<aside><div class="logo">Nova<span>Cart</span></div><a class="active">Dashboard</a><a href="/">Storefront</a><a href="#products">Products</a><a href="#orders">Orders</a></aside>
-<main><header><div><small>ADMINISTRATION</small><h1>Store overview</h1></div><a href="/" class="view">View store ↗</a></header>
-<section class="stats"><div><small>PRODUCTS</small><b id="productsN">0</b></div><div><small>ORDERS</small><b id="ordersN">0</b></div><div><small>REVENUE</small><b id="revenue">₦0</b></div><div><small>CUSTOMERS</small><b id="customers">0</b></div><div><small>LOW STOCK</small><b id="low">0</b></div></section>
-<section class="panel"><div class="panelhead"><h2>Catalog</h2><button onclick="showForm()">+ Add product</button></div><div id="productTable"></div></section>
-<section class="panel"><h2>Sales overview</h2><div id="bars" class="bars"></div></section>
-<section class="panel"><h2>Recent orders</h2><div id="orders"></div></section>
-<div id="modal" class="modal"><form onsubmit="saveProduct(event)"><button type="button" class="x" onclick="hideForm()">×</button><h2 id="formTitle">Add product</h2><input id="name" placeholder="Product name" required><input id="category" placeholder="Category" required><input id="price" type="number" placeholder="Price (NGN)" required><input id="stock" type="number" placeholder="Stock" required><input id="image" placeholder="Image URL" required><textarea id="description" placeholder="Description"></textarea><button class="save">Save product</button></form></div>
-<script src="admin.js"></script></main></body></html>

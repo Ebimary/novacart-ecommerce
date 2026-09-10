@@ -2,9 +2,17 @@
   "name": "novacart-fullstack",
   "version": "2.0.0",
   "private": true,
-  "scripts": {"start": "node server.js", "dev": "node server.js"},
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.7.0",
-    "express": "^4.21.2"
+    "express": "^4.22.2",
+    "express-session": "^1.19.0"
+  },
+  "overrides": {
+    "qs": "6.16.0"
   }
 }

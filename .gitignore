@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# SQLite database
+*.db
+*.sqlite
+*.sqlite3
+novacart.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / editor files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Build / coverage
+dist/
+build/
+coverage/
+
+# Render / deployment local files
+.render/node_modules/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+npm-debug.log*
