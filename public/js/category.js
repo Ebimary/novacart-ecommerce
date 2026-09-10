@@ -1,4 +1,4 @@
-/* NovaCart — Category page: banner, search and sort within a category */
+/* Marygold Collections — Category page: banner, search and sort within a category */
 (function () {
   "use strict";
   const { store, helpers, cardHTML, CATEGORY_META } = window.Nova;
@@ -52,11 +52,11 @@
   }
 
   function showMissing() {
-    document.title = "Category not found — NovaCart";
+    document.title = "Category not found — Marygold Collections";
     els.name().textContent = "Category not found";
     els.meta().textContent = "The category you’re looking for doesn’t exist. It may have been renamed or removed.";
     els.noResult().style.display = "block";
-    els.noResultMsg().textContent = "This category could not be found on NovaCart.";
+    els.noResultMsg().textContent = "This category could not be found on Marygold Collections.";
     document.getElementById("catSearchClear").style.display = "none";
     document.querySelector("#main .shop-bar").style.display = "none";
   }
@@ -69,9 +69,9 @@
       const c = cats[0];
 
       state.slug = c.slug;
-      document.title = `${c.name} — NovaCart`;
+      document.title = `${c.name} — Marygold Collections`;
       document.querySelector('meta[name="description"]').setAttribute("content",
-        c.description || `Shop ${c.name} at NovaCart. Browse ${c.name} products online.`);
+        c.description || `Shop ${c.name} at Marygold Collections. Browse ${c.name} products online.`);
       els.crumb().textContent = c.name;
       els.name().textContent = c.name;
       if (c.description) els.desc().textContent = c.description;

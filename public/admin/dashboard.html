@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Admin Dashboard — NovaCart</title>
+<title>Admin Dashboard — Marygold Collections</title>
 <meta name="robots" content="noindex">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,13 +13,14 @@
 <body>
 <div class="admin-shell">
   <aside class="sidebar">
-    <div class="side-brand"><a href="/admin">Nova<span>Cart</span></a><small>Admin</small></div>
+    <div class="side-brand"><a href="/admin">Marygold<span> Collections</span></a><small>Admin</small></div>
     <nav class="side-nav" aria-label="Admin navigation">
       <a href="#" class="side-link active" data-tab="dashboard">Dashboard</a>
       <a href="#" class="side-link" data-tab="products">Products</a>
       <a href="#" class="side-link" data-tab="categories">Categories</a>
       <a href="#" class="side-link" data-tab="orders">Orders</a>
       <a href="#" class="side-link" data-tab="customers">Customers</a>
+      <a href="#" class="side-link" data-tab="subscribers">Subscribers</a>
       <a href="#" class="side-link" data-tab="inventory">Inventory</a>
       <a href="#" class="side-link" data-tab="analytics">Analytics</a>
       <a href="#" class="side-link" data-tab="settings">Settings</a>
@@ -63,6 +64,10 @@
         <div class="panel">
           <div class="panel-head"><h2>Orders by status</h2></div>
           <div id="statusBars"></div>
+          <div style="margin-top:22px;padding-top:18px;border-top:1px solid var(--adline)">
+            <div class="panel-head"><h2 style="font-size:16px">Orders by payment</h2></div>
+            <div id="payBars"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -110,6 +115,37 @@
       <div class="panel">
         <div class="panel-head"><h2>Inventory</h2></div>
         <div id="inventoryTable" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <!-- SUBSCRIBERS -->
+    <section id="tab-subscribers" class="tab" style="display:none">
+      <div class="sub-stats">
+        <div class="stat-card"><span>Total subscribers</span><b id="subTotal">0</b><small>All time, incl. unsubscribed</small></div>
+        <div class="stat-card"><span>Active</span><b id="subActive">0</b><small>Currently receiving emails</small></div>
+        <div class="stat-card"><span>Unsubscribed</span><b id="subUnsub">0</b><small>Opted out</small></div>
+        <div class="stat-card"><span>New this month</span><b id="subNew">0</b><small>Joined since the 1st</small></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Newsletter subscribers</h2>
+          <button class="btn-accent admin-active" id="addSubscriberBtn">+ Add subscriber</button>
+        </div>
+        <div class="sub-toolbar">
+          <input id="subSearch" type="search" placeholder="Search by email…" aria-label="Search subscribers">
+          <div class="sub-filters" role="group" aria-label="Filter subscribers by status">
+            <button type="button" class="sub-filter active" data-subfilter="all">All</button>
+            <button type="button" class="sub-filter" data-subfilter="subscribed">Active</button>
+            <button type="button" class="sub-filter" data-subfilter="unsubscribed">Unsubscribed</button>
+          </div>
+          <select id="subSort" class="sub-sort" aria-label="Sort subscribers">
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="email">Email A–Z</option>
+          </select>
+          <span class="sub-result" id="subResult"></span>
+        </div>
+        <div id="subscribersTable" class="table-wrap"></div>
       </div>
     </section>
 
@@ -169,7 +205,22 @@
       <div class="mfield"><label for="pPrice">Price (₦)</label><input id="pPrice" type="number" min="0" step="1" required></div>
       <div class="mfield"><label for="pStock">Stock</label><input id="pStock" type="number" min="0" step="1" required></div>
     </div>
-    <div class="mfield"><label for="pImage">Image URL</label><input id="pImage" type="url" placeholder="https://…" required></div>
+    <div class="mfield"><label for="pImage">Image</label>
+      <div class="media-row">
+        <input id="pImage" type="text" placeholder="https://… or use the Upload button" required>
+        <label class="upload-btn" for="pImageFile">Upload</label>
+        <input type="file" id="pImageFile" accept="image/jpeg,image/png,image/gif,image/webp" hidden>
+      </div>
+      <img id="pImagePreview" class="media-preview" alt="Image preview" hidden>
+    </div>
+    <div class="mfield"><label for="pVideoUrl">Video (optional) <span class="hint">shown on the product page</span></label>
+      <div class="media-row">
+        <input id="pVideoUrl" type="text" placeholder="https://… or upload an MP4 / WebM / MOV">
+        <label class="upload-btn" for="pVideoFile">Upload</label>
+        <input type="file" id="pVideoFile" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" hidden>
+      </div>
+      <video id="pVideoPreview" class="media-preview" controls hidden></video>
+    </div>
     <div class="mfield"><label for="pDescription">Description</label><textarea id="pDescription" rows="3"></textarea></div>
     <div class="mfield"><label for="pRating">Rating (0–5)</label><input id="pRating" type="number" min="0" max="5" step="0.1" value="4.5"></div>
     <label class="mcheck"><input type="checkbox" id="pFeatured"> Mark as featured</label>
@@ -221,6 +272,26 @@
     <button type="button" class="modal-x" id="orderModalClose" aria-label="Close">&times;</button>
     <div id="orderModalBody"></div>
   </div>
+</div>
+
+<!-- Add / edit subscriber modal -->
+<div class="modal" id="subscriberModal">
+  <form class="modal-card" id="subscriberForm" novalidate>
+    <button type="button" class="modal-x" id="subscriberModalClose" aria-label="Close">&times;</button>
+    <h2 id="subscriberFormTitle">Add subscriber</h2>
+    <p class="form-error" id="subscriberError" style="display:none"></p>
+    <div class="mfield"><label for="sEmail">Email address</label><input id="sEmail" type="email" autocomplete="off" required></div>
+    <div class="mfield"><label for="sStatus">Status</label>
+      <select id="sStatus">
+        <option value="subscribed">Subscribed</option>
+        <option value="unsubscribed">Unsubscribed</option>
+      </select>
+    </div>
+    <div class="mbuttons">
+      <button type="button" class="tbtn" id="subscriberModalCancel">Cancel</button>
+      <button class="btn-accent admin-active" type="submit" id="subscriberModalSave">Save subscriber</button>
+    </div>
+  </form>
 </div>
 
 <script src="/admin/js/admin.js"></script>

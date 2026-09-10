@@ -1,4 +1,4 @@
-/* NovaCart — Shop page: search, filter, sort */
+/* Marygold Collections — Shop page: search, filter, sort */
 (function () {
   "use strict";
   const { store, cart, toast, helpers, cardHTML } = window.Nova;

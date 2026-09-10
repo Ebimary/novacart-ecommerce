@@ -5,12 +5,50 @@ node_modules/
 .env
 .env.*
 !.env.example
+.envrc
+
+# Private keys & credentials
+*.pem
+*.key
+*.p12
+*.jks
+*.cer
+*.crt
+id_rsa*
+id_ed25519*
+*.p8
+*.keystore
+
+# Package-manager auth / tokens
+.npmrc
+.yarnrc
+.pypirc
+.gem
+.fog
+.netrc
+.npm
+
+# Cloud / provider configs
+.aws/
+.azure/
+.gcp/
+.gcloud/
+firebase.json
 
 # Database files
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
 novacart.db
+
+# Local private MariaDB data (created by scripts/dev-db.sh)
+.data/
+scripts/dev-db.sh
+
+# Admin-uploaded product images / videos
+public/uploads/
 
 # Logs
 *.log
@@ -29,6 +67,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+*.bak
+*.old
+*.backup
 
 # Build / coverage
 dist/
@@ -37,10 +78,3 @@ coverage/
 
 # Render / deployment local files
 .render/node_modules/
-*.db
-*.db-shm
-*.db-wal
-.env
-.env.*
-!.env.example
-npm-debug.log*

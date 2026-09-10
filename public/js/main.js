@@ -1,4 +1,4 @@
-/* NovaCart — shared storefront behaviour (every customer page) */
+/* Marygold Collections — shared storefront behaviour (every customer page) */
 (function () {
   "use strict";
 

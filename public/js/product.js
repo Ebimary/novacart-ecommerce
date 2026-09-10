@@ -1,4 +1,4 @@
-/* NovaCart — Product details page */
+/* Marygold Collections — Product details page */
 (function () {
   "use strict";
   const { store, cart, toast, helpers, cardHTML } = window.Nova;
@@ -36,9 +36,13 @@
       : '<button class="btn btn-accent" id="addToCart">Add to Cart</button>';
     const buyBtn = soldOut ? "" : '<button class="btn btn-outline" id="buyNow">Buy Now</button>';
 
+    const media = p.video_url
+      ? `<video class="main-img" src="${helpers.esc(p.video_url)}" controls playsinline poster="${helpers.esc(p.image || "")}"></video>`
+      : `<img class="main-img" src="${helpers.esc(p.image || "")}" alt="${helpers.esc(p.name)}">`;
+
     return `
       <div class="pd-media">
-        <img class="main-img" src="${helpers.esc(p.image || "")}" alt="${helpers.esc(p.name)}">
+        ${media}
       </div>
       <div class="pd-info">
         <span class="pd-cat">${helpers.esc(p.category)}</span>
@@ -104,7 +108,7 @@
     store.get(`/api/products/${id}`)
       .then(p => {
         product = p;
-        document.title = `${p.name} — NovaCart`;
+        document.title = `${p.name} — Marygold Collections`;
         crumbCat().innerHTML = `<a href="/category/${encodeURIComponent(p.category_slug || "")}">${helpers.esc(p.category)}</a>`;
         root().innerHTML = markup(p);
         bindActions();

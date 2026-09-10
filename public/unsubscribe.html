@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Unsubscribe — Marygold Collections</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:"Inter",system-ui,Arial,sans-serif;background:#f6f1eb;color:#1c1917;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;-webkit-font-smoothing:antialiased}
+  .card{background:#fff;border:1px solid #eadfd3;border-radius:18px;padding:44px 36px;width:min(480px,100%);box-shadow:0 24px 60px rgba(28,25,23,.12);text-align:center}
+  .brand{font-family:Georgia,serif;font-size:28px;font-weight:700;color:#1c1917}
+  .brand span{color:#b45309;font-style:italic}
+  h1{font-family:Georgia,serif;font-size:25px;margin:22px 0 10px;line-height:1.3}
+  p{color:#57534e;font-size:15px;line-height:1.65}
+  .mail{font-weight:700;color:#1c1917}
+  .actions{display:flex;gap:10px;justify-content:center;margin-top:26px;flex-wrap:wrap}
+  .btn{display:inline-block;border-radius:999px;padding:13px 26px;font-weight:700;font-size:14.5px;cursor:pointer;border:1px solid transparent;text-decoration:none;transition:.15s}
+  .btn-solid{background:#b45309;color:#fff}
+  .btn-solid:hover{background:#92400e}
+  .btn-ghost{background:#fff;color:#1c1917;border-color:#e2d7c9}
+  .btn-ghost:hover{border-color:#b45309;color:#b45309}
+  .btn[disabled]{opacity:.6;cursor:not-allowed}
+  .ico{width:76px;height:76px;margin:0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-top:4px}
+  .ico svg{width:36px;height:36px}
+  .ico.ok{background:#e6f6f4;color:#0f766e}
+  .ico.off{background:#fef2f2;color:#b91c1c}
+  .ico.info{background:#fdf0e0;color:#b45309}
+  .hidden{display:none}
+  .err{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;border-radius:10px;padding:12px 14px;font-size:13.5px;margin-top:18px}
+  .links{margin-top:22px;font-size:13px}
+  .links a{color:#8a837c;text-decoration:underline}
+</style>
+</head>
+<body>
+  <div class="card">
+    <a class="brand" href="/">Marygold<span> Collections</span></a>
+
+    <section id="state-checking" class="hidden">
+      <div class="ico info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5l3 3"/></svg></div>
+      <h1>Checking your subscription…</h1>
+      <p>One moment while we look up your details.</p>
+    </section>
+
+    <section id="state-confirm" class="hidden">
+      <div class="ico off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></div>
+      <h1>Leave the Marygold Collections list?</h1>
+      <p id="confirm-email"></p>
+      <p>We will stop sending you our newsletter, new-arrival alerts and subscriber-only offers. You can re-join any time from the Marygold Collections homepage.</p>
+      <div class="actions">
+        <button id="btnConfirm" class="btn btn-ghost">Unsubscribe</button>
+        <a class="btn btn-solid" href="/">Keep me subscribed</a>
+      </div>
+      <p id="confirm-err" class="err hidden"></p>
+    </section>
+
+    <section id="state-removed" class="hidden">
+      <div class="ico ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg></div>
+      <h1>You're unsubscribed</h1>
+      <p class="mail" id="removed-email"></p>
+      <p>You won't receive future Marygold Collections newsletter emails from this address. If this was a mistake, you can re-subscribe on the Marygold Collections homepage.</p>
+      <div class="actions"><a class="btn btn-solid" href="/">Back to Marygold Collections</a></div>
+    </section>
+
+    <section id="state-invalid" class="hidden">
+      <div class="ico off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg></div>
+      <h1>This link doesn't look right</h1>
+      <p>The unsubscribe link is not valid — it may be incomplete, expired or already used. If you used a link from a forwarded email, please use the one in your own inbox.</p>
+      <div class="actions"><a class="btn btn-solid" href="/">Back to Marygold Collections</a></div>
+    </section>
+
+    <p class="links"><a href="/">nova-cart</a> &middot; Victoria Island, Lagos &middot; <a href="/contact">Contact us</a></p>
+  </div>
+<script src="/js/unsubscribe.js"></script>
+</body>
+</html>

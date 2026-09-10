@@ -1,4 +1,4 @@
-# NovaCart — Full-stack E-commerce Portfolio Project
+# Marygold Collections — Full-stack E-commerce Portfolio Project
 
 A portfolio-ready full-stack e-commerce demo: a customer storefront plus a server-side-protected admin dashboard, built with Node.js, Express and MySQL.
 
@@ -13,6 +13,7 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 - Checkout with validation, stock checks, delivery-fee logic and automatic inventory decrement
 - Order confirmation lookup protected by order email
 - Newsletter and contact forms
+- **Email notifications**: subscribers get a welcome email (and the store owner is notified of every new subscription with the running total), and every new order is emailed to the store owner with the full customer + item details (via SMTP; falls back to the server log when SMTP isn't configured)
 - Nigerian Naira (₦/NGN) formatting and free-delivery over ₦100,000
 - Fully responsive layout
 
@@ -20,6 +21,7 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 - Secure login at `/admin/login` (`express-session` + `bcryptjs`), all `/api/admin/*` routes require a session
 - Dashboard with revenue, orders, customers, low/out-of-stock counts and a 14-day sales chart
 - Product CRUD (create, edit, delete, featured, rating, duplicate-name protection) with a category dropdown populated from the database and a quick "+ New" option to create a category inline
+- **Image/video uploads**: upload a product image (JPG/PNG/GIF/WebP) or video (MP4/WebM/MOV) straight from the product form — files are stored under `public/uploads/` and the video plays on the product page
 - **Category management**: add, edit and delete categories (auto-generated slugs, custom images and descriptions, duplicate-protection)
 - Deleting a category with products is blocked; admins can reassign its products to another category in the same step
 - Order management with status updates and full detail view
@@ -33,11 +35,29 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 - MySQL 8+ / MariaDB 10.5+ via `mysql2`
 - `express-session` with a MySQL session store (logins survive restarts)
 - `bcryptjs` password hashing
+- `nodemailer` for email notifications, `multer` for image/video uploads
 - Vanilla JS front-end (no bundler), CSP security headers
 
 ## Run locally
-1. Install Node.js 18+ and MySQL 8+ (or MariaDB 10.5+).
-2. Create the database and a user (or adjust the variables below):
+
+**Quickest — `npm start` just works**
+
+`npm start` boots a private MariaDB instance (owned by your user, no root/sudo needed) and then launches the app:
+
+1. Install Node.js 18+ and the MariaDB server binaries (`mariadb-server`, or MySQL server — the scripts use `mariadbd`/`mariadb-install-db`).
+2. From the project folder run `npm install` (once).
+3. Run `npm start`.
+4. Open http://localhost:3000
+5. Admin dashboard: http://localhost:3000/admin
+
+The private database lives in `.data/mysql` (git-ignored), listens on `127.0.0.1:3308` as user `novacart`, and is created + seeded automatically on first run (password comes from `MYSQL_PASSWORD` in `.env`). Useful extras:
+
+- `npm run db:start` / `npm run db:stop` / `npm run db:status` — manage just the database
+- `npm run server` — run the app without touching the database (expects MySQL to be reachable)
+
+**Using your own MySQL / MariaDB instead**
+
+1. Create the database and a user:
 
    ```sql
    CREATE DATABASE novacart CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -46,13 +66,10 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
    FLUSH PRIVILEGES;
    ```
 
-3. From the project folder run `npm install`.
-4. Configure the connection (see the variables table) — the defaults point at `novacart@localhost:3306/novacart`.
-5. Run `npm start`.
-6. Open http://localhost:3000
-7. Admin dashboard: http://localhost:3000/admin
+2. Put the same credentials in `.env` (see the variables table below), e.g. `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`, or a single `DATABASE_URL`.
+3. Run `npm install` and `npm start`.
 
-The schema, and a seed catalog with sample products and categories, are created automatically on the first run. The database can be connected with a single `DATABASE_URL` or individual `MYSQL_*` variables.
+The schema, and a seed catalog with sample products and categories, are created automatically on the first run.
 
 ## Public API
 
@@ -74,24 +91,35 @@ This project deliberately exposes **no** admin data publicly — every `/api/adm
 
 `products` link to `categories` through a relational `category_id` foreign key. A denormalised `products.category` label is kept in sync whenever a category is renamed, so existing queries and filters keep working unmodified. Categories are seeded idempotently on startup (only when the table is empty), and slugs are auto-generated from category names (`Hats & Caps` → `hats-and-caps`). Deleting a category is blocked while it still contains products unless those products are moved to another category first.
 
-### Default admin credentials (local demo only)
-- Email: `admin@novacart.com`
-- Password: `admin123`
-
-Change the password from the admin **Settings** tab, or override the defaults with environment variables (recommended for production):
+### Admin credentials
+- Email: the value of `ADMIN_EMAIL` in your environment
+- Password: set via the `ADMIN_PASSWORD` environment variable (there is no default — the app refuses to start without one)
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port |
-| `ADMIN_EMAIL` | `admin@novacart.com` | Admin login email (seeded on first run) |
-| `ADMIN_PASSWORD` | `admin123` | Admin login password (seeded on first run) |
-| `SESSION_SECRET` | `nova-local-dev-secret-change-me` | Signs the admin session cookie — set a strong value in production (`openssl rand -hex 32`) |
+| `ADMIN_EMAIL` | *(set your own)* | Admin login email (seeded on first run) |
+| `ADMIN_PASSWORD` | *(required — no default)* | Admin login password (seeded on first run) |
+| `SESSION_SECRET` | *(required — no default)* | Signs the admin session cookie — set a strong value (`openssl rand -hex 32`) |
 | `DATABASE_URL` | `mysql://user:pass@host:port/novacart` | Full MySQL connection string (overrides the `MYSQL_*` variables) |
 | `MYSQL_HOST` | `localhost` | MySQL host |
 | `MYSQL_PORT` | `3306` | MySQL port |
 | `MYSQL_USER` | `novacart` | MySQL user |
 | `MYSQL_PASSWORD` | `` | MySQL password |
 | `MYSQL_DATABASE` | `novacart` | MySQL database name |
+| `STORE_EMAIL` | `ADMIN_EMAIL` | Where order-notification emails are sent |
+| `SMTP_HOST` | `` | Outgoing mail server (empty = emails printed to server log) |
+| `SMTP_PORT` | `587` | SMTP port (`465` if `SMTP_SECURE=true`) |
+| `SMTP_SECURE` | `false` | Use TLS/SSL for SMTP |
+| `SMTP_USER` | `` | SMTP username |
+| `SMTP_PASS` | `` | SMTP app password |
+| `MAIL_FROM` | `Marygold Collections <no-reply@marygoldcollections.com>` | "From" address for sent emails |
+
+### Email setup
+Subscribers receive a confirmation email when they join the newsletter (and the store owner is emailed about every new subscription), and the store owner (`STORE_EMAIL`, defaulting to `ADMIN_EMAIL`) receives an email with the full customer and item breakdown for every new order. To actually deliver mail, set `SMTP_HOST` (plus `SMTP_USER`/`SMTP_PASS` — e.g. a Gmail app password). With no `SMTP_HOST`, the emails are written to the server log so local development still shows exactly what would be sent.
+
+### Product image / video uploads
+The admin product form uploads images and videos via `POST /api/admin/upload` (admin session required). Files land in `public/uploads/{images,videos}` and are served from `/uploads/...`. On Render (or any ephemeral host) uploads live for the life of the instance — for persistent production storage connect a CDN/object store instead.
 
 ## Deploying on Render
 

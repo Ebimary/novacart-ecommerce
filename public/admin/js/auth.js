@@ -1,4 +1,4 @@
-/* NovaCart Admin — login page */
+/* Marygold Collections Admin — login page */
 (function () {
   "use strict";
   const form = document.getElementById("loginForm");

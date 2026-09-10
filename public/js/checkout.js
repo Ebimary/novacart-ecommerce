@@ -1,4 +1,4 @@
-/* NovaCart — Checkout page */
+/* Marygold Collections — Checkout page */
 (function () {
   "use strict";
   const { store, cart, toast, helpers } = window.Nova;

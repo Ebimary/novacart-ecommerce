@@ -1,4 +1,4 @@
-/* NovaCart — Contact page */
+/* Marygold Collections — Contact page */
 (function () {
   "use strict";
   const { store, helpers } = window.Nova;

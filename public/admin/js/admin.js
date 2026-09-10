@@ -1,4 +1,4 @@
-/* NovaCart Admin — dashboard SPA */
+/* Marygold Collections Admin — dashboard SPA */
 (function () {
   "use strict";
 
@@ -23,12 +23,17 @@
     return map[kind] || "pill dim";
   }
   function statusKind(s) {
-    if (s === "Delivered") return "ok";
+    if (s === "Delivered" || s === "Confirmed") return "ok";
     if (s === "Cancelled") return "bad";
     if (s === "Pending") return "warn";
-    if (s === "Shipped") return "info";
-    if (s === "Confirmed" || s === "Processing") return "dim";
+    if (s === "Shipped" || s === "Processing") return "info";
     return "dim";
+  }
+  function paymentKind(s) {
+    if (s === "Paid") return "ok";
+    if (s === "Failed") return "bad";
+    if (s === "Refunded") return "dim";
+    return "warn";
   }
   function stockKind(p) {
     if (p.stock <= 0) return { pill: "pill bad", label: "Out of stock" };
@@ -40,6 +45,11 @@
     try { return new Date(iso.replace(" ", "T") + "Z").toLocaleDateString("en-NG", { day: "numeric", month: "short", year: "numeric" }); }
     catch (_) { return String(iso).slice(0, 10); }
   }
+  function fmtDateTime(iso) {
+    if (!iso) return "—";
+    try { return new Date(iso.replace(" ", "T") + "Z").toLocaleString("en-NG", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }); }
+    catch (_) { return String(iso).slice(0, 16); }
+  }
   function itemsCount(o) { return (Number(o.item_qty) || 0); }
 
   function showError(msg, persistMs) {
@@ -50,12 +60,29 @@
     showError._t = setTimeout(() => el.classList.remove("show"), persistMs || 6000);
   }
 
+  /* Floating success / error notice shared across admin tabs. */
+  function showNotice(msg, kind) {
+    let el = $("dashNotice");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "dashNotice";
+      el.className = "dash-notice";
+      const content = document.querySelector(".content");
+      if (content) content.prepend(el);
+      else document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.className = "dash-notice show " + (kind === "err" ? "err" : "ok");
+    clearTimeout(showNotice._t);
+    showNotice._t = setTimeout(() => { el.className = "dash-notice"; }, 5200);
+  }
+
   /* ---------------- Tabs & navigation ---------------- */
   function switchTab(tab) {
     currentTab = tab;
     document.querySelectorAll(".side-link").forEach(a => a.classList.toggle("active", a.dataset.tab === tab));
     document.querySelectorAll(".tab").forEach(s => { s.style.display = s.id === "tab-" + tab ? "block" : "none"; });
-    const titles = { dashboard: "Dashboard", products: "Products", categories: "Categories", orders: "Orders", customers: "Customers", inventory: "Inventory", analytics: "Analytics", settings: "Settings" };
+    const titles = { dashboard: "Dashboard", products: "Products", categories: "Categories", orders: "Orders", customers: "Customers", subscribers: "Newsletter", inventory: "Inventory", analytics: "Analytics", settings: "Settings" };
     $("pageTitle").textContent = titles[tab] || "Dashboard";
     window.scrollTo({ top: 0 });
     if (window.innerWidth < 980) document.querySelector(".sidebar").classList.remove("open");
@@ -89,13 +116,14 @@
 
       const recent = analytics.recentOrders || [];
       $("recentOrders").innerHTML = recent.length
-        ? `<table><thead><tr><th>Order</th><th>Customer</th><th>Date</th><th>Items</th><th>Total</th><th>Status</th></tr></thead><tbody>` +
+        ? `<table><thead><tr><th>Order</th><th>Customer</th><th>Date</th><th>Items</th><th>Total</th><th>Payment</th><th>Status</th></tr></thead><tbody>` +
           recent.map(o => `<tr>
             <td><b>${esc(o.order_number || ("#" + o.id))}</b></td>
             <td><b>${esc(o.customer)}</b><br><small style="color:var(--admuted)">${esc(o.email)}</small></td>
             <td>${fmtDate(o.created_at)}</td>
             <td>${itemsCount(o)}</td>
             <td><b>${money(o.total)}</b></td>
+            <td><span class="${pillFor(paymentKind(o.payment_status))}">${esc(o.payment_label || o.payment_status)}</span></td>
             <td><span class="${pillFor(statusKind(o.status))}">${esc(o.status)}</span></td>
           </tr>`).join("") + "</tbody></table>"
         : '<div class="empty-row">No orders yet. Share your store with customers!</div>';
@@ -107,6 +135,16 @@
         const count = found ? found.count : 0;
         const pct = Math.round((count / max) * 100);
         return `<div class="sbar"><div class="sbar-label"><span>${st}</span><b>${count}</b></div><div class="sbar-track"><div class="sbar-fill" style="width:${Math.max(3, pct)}%"></div></div></div>`;
+      }).join("");
+
+      const payments = analytics.ordersByPayment || [];
+      const maxPay = Math.max(1, ...payments.map(s => s.count));
+      const PAY_BUCKETS = ["Pending", "Paid", "Failed", "Refunded"];
+      $("payBars").innerHTML = PAY_BUCKETS.map(pay => {
+        const found = payments.find(s => s.payment_status === pay);
+        const count = found ? found.count : 0;
+        const pct = Math.round((count / maxPay) * 100);
+        return `<div class="sbar"><div class="sbar-label"><span>${pay === "Pending" ? "Pending / COD" : pay}</span><b>${count}</b></div><div class="sbar-track"><div class="sbar-fill" style="width:${Math.max(3, pct)}%"></div></div></div>`;
       }).join("");
     } catch (err) { showError(err.message); }
   }
@@ -156,9 +194,67 @@
     $("productForm").reset();
     $("pRating").value = "4.5";
     $("pFeatured").checked = false;
+    hideMediaPreview("image");
+    hideMediaPreview("video");
     $("productError").classList.remove("show");
     $("productModal").classList.add("open");
     loadCategoriesIntoSelect();
+  }
+
+  function hideMediaPreview(kind) {
+    const el = $("p" + (kind === "video" ? "VideoPreview" : "ImagePreview"));
+    if (el) el.hidden = true;
+  }
+  function showMediaPreview(kind, src) {
+    const el = $("p" + (kind === "video" ? "VideoPreview" : "ImagePreview"));
+    const input = $("p" + (kind === "video" ? "VideoUrl" : "Image"));
+    if (el && src && input && input.value.trim() !== src) input.value = src;
+    if (el && src) {
+      el.src = src;
+      el.hidden = false;
+    }
+  }
+
+  function bindFileUpload(fileInput, kind) {
+    if (!fileInput) return;
+    fileInput.addEventListener("change", async () => {
+      const errEl = $("productError");
+      errEl.classList.remove("show");
+      const file = fileInput.files[0];
+      if (!file) return;
+      const urlInput = $("p" + (kind === "video" ? "VideoUrl" : "Image"));
+      if (kind === "image") {
+        const reader = new FileReader();
+        reader.onload = e => showMediaPreview("image", e.target.result);
+        reader.readAsDataURL(file);
+      } else {
+        showMediaPreview("video", URL.createObjectURL(file));
+      }
+      urlInput.value = "…uploading";
+      try {
+        const url = await uploadFile(file, kind);
+        urlInput.value = url;
+        showMediaPreview(kind, url);
+      } catch (err) {
+        urlInput.value = "";
+        hideMediaPreview(kind);
+        errEl.textContent = err.message;
+        errEl.classList.add("show");
+      }
+      fileInput.value = "";
+    });
+  }
+
+  async function uploadFile(file, kind) {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/admin/upload?kind=" + (kind === "video" ? "video" : "image"), {
+      method: "POST", body: fd, credentials: "same-origin"
+    });
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* ignore */ }
+    if (!res.ok) throw new Error((data && data.error) || "Upload failed.");
+    return data.url;
   }
 
   async function openEditModal(p) {
@@ -167,20 +263,31 @@
     $("pName").value = p.name;
     $("pPrice").value = p.price;
     $("pStock").value = p.stock;
-    $("pImage").value = p.image;
+    $("pImage").value = p.image || "";
+    $("pVideoUrl").value = p.video_url || "";
     $("pDescription").value = p.description || "";
     $("pRating").value = p.rating || 4.5;
     $("pFeatured").checked = !!p.featured;
+    hideMediaPreview("image");
+    hideMediaPreview("video");
     $("productError").classList.remove("show");
     await loadCategoriesIntoSelect(p.category);
     $("pCategory").value = p.category;
     $("productModal").classList.add("open");
+    if (p.image) showMediaPreview("image", p.image);
+    if (p.video_url) showMediaPreview("video", p.video_url);
   }
 
   $("addProductBtn").addEventListener("click", openProductModal);
   $("productModalClose").addEventListener("click", () => $("productModal").classList.remove("open"));
   $("productModalCancel").addEventListener("click", () => $("productModal").classList.remove("open"));
   $("productModal").addEventListener("click", e => { if (e.target === $("productModal")) $("productModal").classList.remove("open"); });
+
+  bindFileUpload($("pImageFile"), "image");
+  bindFileUpload($("pVideoFile"), "video");
+
+  $("pImage").addEventListener("change", () => { if (!$("pImage").value) hideMediaPreview("image"); });
+  $("pVideoUrl").addEventListener("change", () => { if (!$("pVideoUrl").value) hideMediaPreview("video"); });
 
   $("productForm").addEventListener("submit", async e => {
     e.preventDefault();
@@ -192,6 +299,7 @@
       price: $("pPrice").value,
       stock: $("pStock").value,
       image: $("pImage").value.trim(),
+      video_url: $("pVideoUrl").value.trim(),
       description: $("pDescription").value.trim(),
       rating: $("pRating").value,
       featured: $("pFeatured").checked
@@ -365,6 +473,9 @@
   });
 
   /* ---------------- Orders ---------------- */
+  /* Allowed payment-status transitions — mirrors the server-side whitelist. */
+  const PAY_TRANSITIONS = { Pending: ["Paid", "Failed"], Paid: ["Refunded"], Failed: [], Refunded: [] };
+
   async function loadOrders() {
     try {
       const orders = await api("/api/admin/orders");
@@ -376,7 +487,7 @@
             <td>${fmtDate(o.created_at)}</td>
             <td>${itemsCount(o)}</td>
             <td><b>${money(o.total)}</b></td>
-            <td><span class="${pillFor(o.payment_status === "Paid" ? "ok" : "warn")}">${esc(o.payment_status)}</span><br><small style="color:var(--admuted)">${esc(o.payment_method)}</small></td>
+            <td><span class="${pillFor(paymentKind(o.payment_status))}" title="Payment method: ${esc(o.payment_method)}">${esc(o.payment_label || o.payment_status)}</span><br><small style="color:var(--admuted)">${esc(o.payment_method)}</small></td>
             <td><select class="status-select" data-sid="${o.id}" data-i="${i}" aria-label="Order status">
               ${STATUSES.map(s => `<option value="${s}" ${o.status === s ? "selected" : ""}>${s}</option>`).join("")}
             </select></td>
@@ -390,12 +501,34 @@
 
       document.querySelectorAll("[data-sid]").forEach(sel => {
         sel.addEventListener("change", async () => {
+          if (sel.disabled) return;
           const id = sel.dataset.sid;
+          const previous = orderCache[id] ? orderCache[id].status : sel.options[0].value;
+          sel.disabled = true;
           try {
-            const updated = await api(`/api/admin/orders/${id}/status`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: sel.value }) });
+            const updated = await api(`/api/admin/orders/${id}/status`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: sel.value })
+            });
             if (orderCache[id]) orderCache[id].status = updated.status;
+            sel.value = updated.status;
+            if (updated.updated) {
+              showNotice(`Order ${updated.order_number} status updated to ${updated.status}.`, "ok");
+              if (updated.email && updated.email.sent === false && !updated.email.skipped) {
+                showNotice("Order status updated successfully. Customer notification email failed (see server log).", "err");
+              }
+            } else {
+              showNotice(updated.message || "No change made.", "ok");
+            }
             if (currentTab === "dashboard") await loadDashboard();
-          } catch (err) { showError(err.message); sel.value = orderCache[id].status; }
+            else if (currentTab === "orders") { /* ordering unchanged in list */ }
+          } catch (err) {
+            showError(err.message);
+            sel.value = previous;
+          } finally {
+            sel.disabled = false;
+          }
         });
       });
     } catch (err) { showError(err.message); }
@@ -403,39 +536,221 @@
 
   function viewOrder(id) {
     (async () => {
-    try {
-      const orders = await api("/api/admin/orders");
-      const o = orders.find(x => x.id === Number(id));
-      if (!o) return;
-      const detail = await api(`/api/orders/${encodeURIComponent(o.order_number || o.id)}?email=${encodeURIComponent(o.email)}`);
-      const items = detail.items || [];
-      $("orderModalBody").innerHTML = `
-        <h2>Order ${esc(o.order_number || ("#" + o.id))}</h2>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
-          <span class="${pillFor(statusKind(o.status))}">${esc(o.status)}</span>
-          <span class="${pillFor(o.payment_status === "Paid" ? "ok" : "warn")}">${esc(o.payment_status)}</span>
-          <span class="pill dim">${esc(o.payment_method)}</span>
-        </div>
-        ${items.map(it => `<div style="display:flex;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--adline)">
-          <img class="thumb" src="${esc(it.image || "")}" alt="">
-          <div style="flex:1"><b>${esc(it.product_name || "Item")}</b><br><small style="color:var(--admuted)">Qty ${it.quantity} · ${money(it.price)} each</small></div>
-          <b>${money(it.price * it.quantity)}</b>
-        </div>`).join("")}
-        <div style="margin-top:12px">
-          <div class="om-total"><span>Subtotal</span><b>${money(detail.subtotal || detail.total)}</b></div>
-          <div class="om-total"><span>Delivery</span><b>${Number(detail.delivery_fee) === 0 ? "Free" : money(detail.delivery_fee)}</b></div>
-          <div class="om-total big"><span>Total</span><b>${money(detail.total)}</b></div>
-        </div>
-        <div style="margin-top:16px;background:var(--accent-soft);border-radius:12px;padding:16px;font-size:14px">
-          <b>${esc(detail.customer)}</b>
-          <p style="color:var(--adsoft);margin:4px 0">${esc([detail.address, detail.city, detail.state, detail.country].filter(Boolean).join(", "))}</p>
-          <p style="color:var(--adsoft)">${esc(detail.phone || "")} · ${esc(detail.email)}</p>
-          <p style="color:var(--admuted);margin-top:6px;font-size:12.5px">Placed ${fmtDate(detail.created_at)}</p>
-        </div>`;
-      $("orderModal").classList.add("open");
-    } catch (err) { showError(err.message); }
+      try {
+        const detail = await api("/api/admin/orders/" + id);
+        $("orderModalBody").innerHTML = orderDetailHTML(detail);
+        bindOrderModal(detail.order);
+        $("orderModal").classList.add("open");
+      } catch (err) { showError(err.message); }
     })();
   }
+
+  function payOptionsHTML(o) {
+    const allowed = PAY_TRANSITIONS[o.payment_status] || [];
+    if (!allowed.length) return '<option value="">No change available</option>';
+    return '<option value="">— select —</option>' +
+      allowed.map(s => `<option value="${s}">${s}</option>`).join("");
+  }
+
+  function historyHTML(history) {
+    if (!history || !history.length) return '<p class="om-hint">No status changes recorded yet.</p>';
+    return `<ol class="om-history">` + history.map(h => `
+      <li class="om-hist-item">
+        <div class="om-hist-head"><b>${esc(h.old_status || "—")} → ${esc(h.new_status)}</b><span>${esc(fmtDateTime(h.changed_at))}</span></div>
+        ${h.note ? `<div class="om-hist-note">${esc(h.note)}</div>` : ""}
+        <small class="om-hist-by">Changed by ${esc(h.changed_by || "system")}</small>
+      </li>`).join("") + `</ol>`;
+  }
+
+  function orderDetailHTML(detail) {
+    const o = detail.order || {};
+    const items = detail.items || [];
+    const history = detail.history || [];
+    const trackingUrl = detail.tracking_url || "";
+    return `
+      <div class="om-head">
+        <div>
+          <h2>Order ${esc(o.order_number || ("#" + o.id))}</h2>
+          <small style="color:var(--admuted)">Placed ${esc(fmtDateTime(o.created_at))}</small>
+        </div>
+        ${trackingUrl ? `<a class="track-link" href="${esc(trackingUrl)}" target="_blank" rel="noopener">View customer tracking page ↗</a>` : ""}
+      </div>
+      <div class="om-pills">
+        <span class="${pillFor(statusKind(o.status))}">${esc(o.status)}</span>
+        <span class="${pillFor(paymentKind(o.payment_status))}">${esc(o.payment_label || o.payment_status)}</span>
+        <span class="pill dim">${esc(o.payment_method || "Cash on Delivery")}</span>
+      </div>
+
+      <div class="om-grid">
+        <div class="om-block">
+          <h4>Customer</h4>
+          <b>${esc(o.customer)}</b>
+          <p>${esc(o.email)}${o.phone ? ` &middot; ${esc(o.phone)}` : ""}</p>
+          <p>${esc([o.address, o.city, o.state, o.country].filter(Boolean).join(", ") || "—")}</p>
+        </div>
+        <div class="om-block">
+          <h4>Totals</h4>
+          <div class="om-total"><span>Items</span><b>${o.item_count || items.length}</b></div>
+          <div class="om-total"><span>Subtotal</span><b>${money(o.subtotal || o.total)}</b></div>
+          <div class="om-total"><span>Delivery</span><b>${Number(o.delivery_fee) === 0 ? "Free" : money(o.delivery_fee)}</b></div>
+          <div class="om-total big"><span>Total</span><b>${money(o.total)}</b></div>
+        </div>
+      </div>
+
+      <div class="om-block">
+        <h4>Items</h4>
+        ${items.map(it => `<div style="display:flex;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--adline)">
+          <img class="thumb" src="${esc(it.image || "")}" alt="">
+          <div style="flex:1"><b>${esc(it.product_name || "Item")}</b><br><small style="color:var(--admuted)">Qty ${it.quantity} &middot; ${money(it.price)} each</small></div>
+          <b>${money(it.price * it.quantity)}</b>
+        </div>`).join("") || '<p class="om-hint">No items found.</p>'}
+      </div>
+
+      <div class="om-block">
+        <h4>Order status</h4>
+        <div class="om-inline">
+          <select id="omStatus" aria-label="Update order status">
+            ${STATUSES.map(s => `<option value="${s}" ${o.status === s ? "selected" : ""}>${s}</option>`).join("")}
+          </select>
+          <button class="action-btn admin-active" id="omSaveStatus">Update status</button>
+        </div>
+        <p id="omStatusMsg" class="om-msg" role="status"></p>
+        <p id="omEmailMsg" class="om-msg err"></p>
+      </div>
+
+      <div class="om-block">
+        <h4>Payment status</h4>
+        <div class="om-inline">
+          <select id="omPayStatus" aria-label="Update payment status">${payOptionsHTML(o)}</select>
+          <button class="action-btn admin-active" id="omSavePay">Update payment</button>
+        </div>
+        <p class="om-hint">Allowed transitions: Pending → Paid / Failed &middot; Paid → Refunded. Changes are recorded in the status history.</p>
+        <p id="omPayMsg" class="om-msg" role="status"></p>
+      </div>
+
+      <div class="om-block">
+        <h4>Shipping information</h4>
+        <div class="om-grid2">
+          <div class="om-field"><label for="omCarrier">Shipping carrier</label><input id="omCarrier" type="text" placeholder="e.g. DHL, GIG Logistics" value="${esc(o.shipping_carrier || "")}"></div>
+          <div class="om-field"><label for="omTrackingNo">Tracking number</label><input id="omTrackingNo" type="text" placeholder="Carrier tracking number" value="${esc(o.tracking_number || "")}"></div>
+        </div>
+        <button class="action-btn admin-active" id="omSaveShipping">Save shipping info</button>
+        <p id="omShipMsg" class="om-msg" role="status"></p>
+      </div>
+
+      <div class="om-block">
+        <h4>Status history</h4>
+        ${historyHTML(history)}
+      </div>
+    `;
+  }
+
+  function setMsg(id, text, kind) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.className = "om-msg " + (kind === "err" ? "err" : kind === "info" ? "info" : "ok");
+  }
+
+  async function refreshOrderModal(id) {
+    try {
+      const detail = await api("/api/admin/orders/" + id);
+      $("orderModalBody").innerHTML = orderDetailHTML(detail);
+      bindOrderModal(detail.order);
+    } catch (err) { showError(err.message); }
+  }
+
+  async function saveOrderStatus(o, sel) {
+    const next = String(sel.value || "");
+    if (!next || next === o.status) {
+      setMsg("omStatusMsg", next === o.status ? `Order is already ${o.status}.` : "Choose a new status.", "info");
+      return;
+    }
+    const btn = $("omSaveStatus");
+    btn.disabled = true;
+    try {
+      const updated = await api(`/api/admin/orders/${o.id}/status`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: next })
+      });
+      setMsg("omStatusMsg", updated.message || `Order status updated to ${updated.status}.`, "ok");
+      if (updated.email && updated.email.sent === false && !updated.email.skipped) {
+        setMsg("omEmailMsg", "Order status updated successfully, but the customer notification email failed to send (see server log).", "err");
+      } else {
+        setMsg("omEmailMsg", "", "");
+      }
+      await refreshOrderModal(o.id);
+    } catch (err) {
+      setMsg("omStatusMsg", err.message, "err");
+      sel.value = o.status;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function savePaymentStatus(o, sel) {
+    const next = String(sel.value || "");
+    const allowed = PAY_TRANSITIONS[o.payment_status] || [];
+    if (!next) {
+      setMsg("omPayMsg", allowed.length ? "Choose the new payment status." : "No payment change is available for this status.", "info");
+      return;
+    }
+    if (next === o.payment_status) {
+      setMsg("omPayMsg", `Payment status is already ${o.payment_status}.`, "info");
+      return;
+    }
+    if (!allowed.includes(next)) {
+      setMsg("omPayMsg", `Cannot change payment status from "${o.payment_status}" to "${next}". Allowed: ${allowed.join(" or ") || "none"}.`, "err");
+      return;
+    }
+    const btn = $("omSavePay");
+    btn.disabled = true;
+    try {
+      const updated = await api(`/api/admin/orders/${o.id}/payment-status`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payment_status: next })
+      });
+      setMsg("omPayMsg", updated.message || `Payment status updated to ${next}.`, "ok");
+      await refreshOrderModal(o.id);
+    } catch (err) {
+      setMsg("omPayMsg", err.message, "err");
+      sel.value = "";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function saveShipping(o) {
+    const carrier = $("omCarrier").value.trim();
+    const trackingNumber = $("omTrackingNo").value.trim();
+    const btn = $("omSaveShipping");
+    btn.disabled = true;
+    try {
+      await api(`/api/admin/orders/${o.id}/shipping`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shipping_carrier: carrier, tracking_number: trackingNumber })
+      });
+      setMsg("omShipMsg", "Shipping information saved.", "ok");
+      await refreshOrderModal(o.id);
+    } catch (err) {
+      setMsg("omShipMsg", err.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function bindOrderModal(o) {
+    const statusSel = $("omStatus");
+    if (statusSel) {
+      $("omSaveStatus").addEventListener("click", () => saveOrderStatus(o, statusSel));
+      statusSel.addEventListener("change", () => setMsg("omStatusMsg", "", ""));
+    }
+    const paySel = $("omPayStatus");
+    if (paySel) {
+      $("omSavePay").addEventListener("click", () => savePaymentStatus(o, paySel));
+      paySel.addEventListener("change", () => setMsg("omPayMsg", "", ""));
+    }
+    const shipBtn = $("omSaveShipping");
+    if (shipBtn) shipBtn.addEventListener("click", () => saveShipping(o));
+  }
+
   $("orderModalClose").addEventListener("click", () => $("orderModal").classList.remove("open"));
   $("orderModal").addEventListener("click", e => { if (e.target === $("orderModal")) $("orderModal").classList.remove("open"); });
 
@@ -505,6 +820,120 @@
     } catch (err) { showError(err.message); }
   }
 
+  /* ---------------- Subscribers ---------------- */
+  let subscribersAll = [];
+  let editingSubscriber = null;
+  let subSearchTimer = null;
+
+  async function refreshSubscribers() {
+    try {
+      const params = new URLSearchParams();
+      if ($("subSearch").value.trim()) params.set("q", $("subSearch").value.trim());
+      const active = document.querySelector(".sub-filter.active");
+      const status = active ? active.dataset.subfilter : "all";
+      if (status !== "all") params.set("status", status);
+      const qs = params.toString();
+      const data = await api("/api/admin/subscribers" + (qs ? "?" + qs : ""));
+      subscribersAll = data.subscribers || [];
+
+      $("subTotal").textContent = data.stats.total;
+      $("subActive").textContent = data.stats.active;
+      $("subUnsub").textContent = data.stats.unsubscribed;
+      $("subNew").textContent = data.stats.newThisMonth;
+      $("subResult").textContent = `${data.stats.active} active · ${data.stats.unsubscribed} unsubscribed`;
+
+      renderSubscribers();
+    } catch (err) { showError(err.message); }
+  }
+
+  function renderSubscribers() {
+    const rows = subscribersAll.slice();
+    const sort = ($("subSort") ? $("subSort").value : "newest");
+    if (sort === "email") rows.sort((a, b) => String(a.email).localeCompare(String(b.email)));
+    else if (sort === "recent") rows.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    else if (sort === "oldest") rows.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+
+    $("subscribersTable").innerHTML = rows.length
+      ? `<table><thead><tr><th>Email</th><th>Status</th><th>Subscribed</th><th>Last updated</th><th style="min-width:160px">Actions</th></tr></thead><tbody>` +
+        rows.map(s => `<tr>
+          <td><b>${esc(s.email)}</b></td>
+          <td><span class="${s.status === "unsubscribed" ? "pill bad" : "pill ok"}">${s.status === "unsubscribed" ? "Unsubscribed" : "Subscribed"}</span></td>
+          <td>${fmtDate(s.created_at)}</td>
+          <td>${fmtDate(s.updated_at)}</td>
+          <td>
+            <button class="action-btn" data-act="edit" data-id="${s.id}">Edit</button>
+            <button class="action-btn danger" data-act="delete" data-id="${s.id}">Delete</button>
+          </td>
+        </tr>`).join("") + "</tbody></table>"
+      : '<div class="empty-row">No subscribers found. Add one manually or share the homepage newsletter form.</div>';
+  }
+
+  function openSubscriberModal(subscriber) {
+    editingSubscriber = subscriber || null;
+    $("subscriberFormTitle").textContent = subscriber ? "Edit subscriber" : "Add subscriber";
+    $("subscriberForm").reset();
+    $("sEmail").value = subscriber ? subscriber.email : "";
+    $("sStatus").value = subscriber && subscriber.status === "unsubscribed" ? "unsubscribed" : "subscribed";
+    $("subscriberError").classList.remove("show");
+    $("subscriberModal").classList.add("open");
+  }
+
+  $("addSubscriberBtn").addEventListener("click", () => openSubscriberModal(null));
+  $("subscriberModalClose").addEventListener("click", () => $("subscriberModal").classList.remove("open"));
+  $("subscriberModalCancel").addEventListener("click", () => $("subscriberModal").classList.remove("open"));
+  $("subscriberModal").addEventListener("click", e => { if (e.target === $("subscriberModal")) $("subscriberModal").classList.remove("open"); });
+
+  $("subscriberForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const errEl = $("subscriberError");
+    errEl.classList.remove("show");
+    const body = { email: $("sEmail").value.trim(), status: $("sStatus").value };
+    try {
+      if (editingSubscriber) {
+        await api("/api/admin/subscribers/" + editingSubscriber.id, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      } else {
+        await api("/api/admin/subscribers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      }
+      $("subscriberModal").classList.remove("open");
+      await refreshSubscribers();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.add("show");
+    }
+  });
+
+  document.querySelectorAll(".sub-filter").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".sub-filter").forEach(b => b.classList.toggle("active", b === btn));
+      refreshSubscribers();
+    });
+  });
+
+  if ($("subSearch")) {
+    $("subSearch").addEventListener("input", () => {
+      clearTimeout(subSearchTimer);
+      subSearchTimer = setTimeout(refreshSubscribers, 250);
+    });
+  }
+  if ($("subSort")) {
+    $("subSort").addEventListener("change", renderSubscribers);
+  }
+
+  onTableAction("subscribersTable", (act, id) => {
+    if (act === "edit") { const s = subscribersAll.find(x => x.id === Number(id)); if (s) openSubscriberModal(s); }
+    if (act === "delete") {
+      const s = subscribersAll.find(x => x.id === Number(id));
+      if (!s) return;
+      if (!confirm(`Remove ${s.email} from the newsletter list permanently? This cannot be undone.`)) return;
+      (async () => {
+        try {
+          await api("/api/admin/subscribers/" + id, { method: "DELETE", headers: { "Content-Type": "application/json" } });
+          await refreshSubscribers();
+        } catch (err) { showError(err.message); }
+      })();
+    }
+  });
+
   /* ---------------- Settings ---------------- */
   async function loadSettings() {
     try {
@@ -540,6 +969,7 @@
     categories: loadCategories,
     orders: loadOrders,
     customers: loadCustomers,
+    subscribers: refreshSubscribers,
     inventory: loadInventory,
     analytics: loadAnalytics,
     settings: loadSettings

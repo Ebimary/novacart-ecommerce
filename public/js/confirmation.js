@@ -1,4 +1,4 @@
-/* NovaCart — Order confirmation page */
+/* Marygold Collections — Order confirmation page */
 (function () {
   "use strict";
   const { store, cart, helpers } = window.Nova;
@@ -32,6 +32,10 @@
           </div>
           <span class="status-pill"><span class="dot"></span>${helpers.esc(o.status)}</span>
         </div>
+        ${o.tracking_url ? `<div style="text-align:center;margin:18px 0 22px">
+          <a class="btn btn-accent" href="${helpers.esc(o.tracking_url)}">Track My Order</a>
+          <p style="font-size:12.5px;color:var(--muted);margin-top:8px">Follow your order live — from confirmation to delivery.</p>
+        </div>` : ""}
         <h3 style="font-size:17px;margin-bottom:14px">Items purchased</h3>
         ${(o.items || []).map(it => `
           <div class="oi-line" style="display:flex;gap:14px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft)">

@@ -1,16 +1,22 @@
 {
-  "name": "novacart-fullstack",
+  "name": "marygold-collections",
   "version": "2.0.0",
   "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "bash scripts/start.sh",
+    "server": "node server.js",
+    "db:start": "bash scripts/dev-db.sh start",
+    "db:stop": "bash scripts/dev-db.sh stop",
+    "db:status": "bash scripts/dev-db.sh status"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
     "express": "^4.22.2",
     "express-session": "^1.19.0",
-    "mysql2": "^3.11.5"
+    "multer": "^2.3.0",
+    "mysql2": "^3.11.5",
+    "nodemailer": "^10.0.3"
   },
   "overrides": {
     "qs": "6.16.0"
