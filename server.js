@@ -70,6 +70,7 @@ function dbConfig() {
       user: decodeURIComponent(u.username || ""),
       password: decodeURIComponent(u.password || ""),
       database: (u.pathname.replace(/^\//, "") || DEFAULT_DATABASE).replace(/`/g, ""),
+      connectTimeout: 10000,
       ...dbSsl(sslEnabled)
     };
   }
@@ -80,6 +81,7 @@ function dbConfig() {
     user: process.env.MYSQL_USER || "novacart",
     password: process.env.MYSQL_PASSWORD || "",
     database: (process.env.MYSQL_DATABASE || DEFAULT_DATABASE).replace(/`/g, ""),
+    connectTimeout: 10000,
     ...dbSsl(sslEnabled)
   };
 }
@@ -2008,6 +2010,21 @@ class MySQLSessionStore extends session.Store {
 
   app.listen(PORT, () => console.log(`Marygold Collections running at http://localhost:${PORT}`));
 })().catch(err => {
-  console.error("Failed to start Marygold Collections: " + (err && err.message ? err.message : err));
+  const parts = [];
+  if (err && Array.isArray(err.errors) && err.errors.length) {
+    for (const sub of err.errors) parts.push(sub && sub.message ? sub.message : String(sub));
+  }
+  const summary = parts.length
+    ? `${err.name || "AggregateError"}: ${parts.join("; ")}`
+    : (err && err.message ? err.message : String(err));
+  console.error("Failed to start Marygold Collections: " + summary);
+  if (/ETIMEDOUT|ENETUNREACH|ECONNREFUSED|ENOTFOUND/.test(summary)) {
+    console.error(
+      "The app could not reach its MySQL database. Check that DATABASE_URL / MYSQL_HOST, MYSQL_PORT " +
+      "point at an external, internet-accessible MySQL server (Render instances have no local MySQL and " +
+      "localhost/127.0.0.1 will not work). Add ?ssl=true to DATABASE_URL (or MYSQL_SSL=true) if the " +
+      "provider requires TLS, and allowlist Render's egress IPs if the provider uses one."
+    );
+  }
   process.exit(1);
 });
