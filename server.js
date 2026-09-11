@@ -51,24 +51,36 @@ function siteBaseUrl() {
 
 /* Database connection settings. Prefer a single DATABASE_URL
    (e.g. mysql://user:pass@host:port/novacart) or individual
-   MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE. */
+   MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE.
+   Cloud databases usually require TLS: enable it by adding ?ssl=true (or
+   ssl-mode=required) to DATABASE_URL, or by setting MYSQL_SSL=true. */
+const dbSsl = enabled => (enabled ? { ssl: { rejectUnauthorized: false } } : {});
+
 function dbConfig() {
   if (process.env.DATABASE_URL) {
     const u = new URL(process.env.DATABASE_URL);
+    const sslQuery = (u.searchParams.get("ssl") || "").toLowerCase();
+    const sslMode = (u.searchParams.get("ssl-mode") || "").toLowerCase();
+    const sslEnabled =
+      sslQuery === "true" || sslQuery === "1" || sslQuery === "preferred" || sslQuery === "required" ||
+      sslMode === "preferred" || sslMode === "required" || sslMode === "verify-ca" || sslMode === "verify-full";
     return {
       host: u.hostname,
       port: Number(u.port || 3306),
       user: decodeURIComponent(u.username || ""),
       password: decodeURIComponent(u.password || ""),
-      database: (u.pathname.replace(/^\//, "") || DEFAULT_DATABASE).replace(/`/g, "")
+      database: (u.pathname.replace(/^\//, "") || DEFAULT_DATABASE).replace(/`/g, ""),
+      ...dbSsl(sslEnabled)
     };
   }
+  const sslEnabled = /^(1|true|required|preferred)$/i.test(String(process.env.MYSQL_SSL || ""));
   return {
     host: process.env.MYSQL_HOST || "localhost",
     port: Number(process.env.MYSQL_PORT || 3306),
     user: process.env.MYSQL_USER || "novacart",
     password: process.env.MYSQL_PASSWORD || "",
-    database: (process.env.MYSQL_DATABASE || DEFAULT_DATABASE).replace(/`/g, "")
+    database: (process.env.MYSQL_DATABASE || DEFAULT_DATABASE).replace(/`/g, ""),
+    ...dbSsl(sslEnabled)
   };
 }
 
@@ -77,7 +89,8 @@ let pool;
 async function initDatabase() {
   const cfg = dbConfig();
   const bootstrap = await mysql.createConnection({
-    host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password, charset: "utf8mb4"
+    host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password, charset: "utf8mb4",
+    ...(cfg.ssl ? { ssl: cfg.ssl } : {})
   });
   try {
     await bootstrap.query(
