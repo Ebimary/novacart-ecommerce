@@ -43,7 +43,7 @@ firebase.json
 *.db-wal
 novacart.db
 
-# Local private MariaDB data (created by scripts/dev-db.sh)
+# Local private PostgreSQL data (created by scripts/dev-db.sh)
 .data/
 scripts/dev-db.sh
 

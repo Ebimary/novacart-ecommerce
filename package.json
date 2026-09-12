@@ -15,8 +15,8 @@
     "express": "^4.22.2",
     "express-session": "^1.19.0",
     "multer": "^2.3.0",
-    "mysql2": "^3.11.5",
-    "nodemailer": "^10.0.3"
+    "nodemailer": "^10.0.3",
+    "pg": "^8.23.0"
   },
   "overrides": {
     "qs": "6.16.0"

@@ -1,6 +1,6 @@
 # Marygold Collections — Full-stack E-commerce Portfolio Project
 
-A portfolio-ready full-stack e-commerce demo: a customer storefront plus a server-side-protected admin dashboard, built with Node.js, Express and MySQL.
+A portfolio-ready full-stack e-commerce demo: a customer storefront plus a server-side-protected admin dashboard, built with Node.js, Express and PostgreSQL.
 
 ## Features
 
@@ -32,8 +32,8 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 
 ## Tech
 - Node.js 18+ / Express
-- MySQL 8+ / MariaDB 10.5+ via `mysql2`
-- `express-session` with a MySQL session store (logins survive restarts)
+- PostgreSQL 12+ via the `pg` driver
+- `express-session` with a PostgreSQL session store (logins survive restarts)
 - `bcryptjs` password hashing
 - `nodemailer` for email notifications, `multer` for image/video uploads
 - Vanilla JS front-end (no bundler), CSP security headers
@@ -42,31 +42,29 @@ A portfolio-ready full-stack e-commerce demo: a customer storefront plus a serve
 
 **Quickest — `npm start` just works**
 
-`npm start` boots a private MariaDB instance (owned by your user, no root/sudo needed) and then launches the app:
+`npm start` boots a private PostgreSQL instance (owned by your user, no root/sudo needed) in `.data/pg` and then launches the app:
 
-1. Install Node.js 18+ and the MariaDB server binaries (`mariadb-server`, or MySQL server — the scripts use `mariadbd`/`mariadb-install-db`).
+1. Install Node.js 18+ and the PostgreSQL server binaries (`postgresql`, or the server package for your distro — `initdb`/`pg_ctl` must be on `PATH` or under `/usr/lib/postgresql/*/bin`).
 2. From the project folder run `npm install` (once).
 3. Run `npm start`.
 4. Open http://localhost:3000
 5. Admin dashboard: http://localhost:3000/admin
 
-The private database lives in `.data/mysql` (git-ignored), listens on `127.0.0.1:3308` as user `novacart`, and is created + seeded automatically on first run (password comes from `MYSQL_PASSWORD` in `.env`). Useful extras:
+The private database lives in `.data/pg` (git-ignored), listens on `127.0.0.1:5439` (the system PostgreSQL on `5432` is left alone) and is created + seeded automatically on first run. Localhost connections use trust auth, so no password is needed. Useful extras:
 
 - `npm run db:start` / `npm run db:stop` / `npm run db:status` — manage just the database
-- `npm run server` — run the app without touching the database (expects MySQL to be reachable)
+- `npm run server` — run the app without touching the database (expects PostgreSQL to be reachable)
 
-**Using your own MySQL / MariaDB instead**
+**Using your own PostgreSQL instead**
 
 1. Create the database and a user:
 
    ```sql
-   CREATE DATABASE novacart CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-   CREATE USER 'novacart'@'localhost' IDENTIFIED BY 'novacart';
-   GRANT ALL PRIVILEGES ON novacart.* TO 'novacart'@'localhost';
-   FLUSH PRIVILEGES;
+   CREATE ROLE novacart LOGIN;
+   CREATE DATABASE novacart OWNER novacart;
    ```
 
-2. Put the same credentials in `.env` (see the variables table below), e.g. `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`, or a single `DATABASE_URL`.
+2. Put the same credentials in `.env` (see the variables table below), e.g. `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, or a single `DATABASE_URL`.
 3. Run `npm install` and `npm start`.
 
 The schema, and a seed catalog with sample products and categories, are created automatically on the first run.
@@ -101,12 +99,13 @@ This project deliberately exposes **no** admin data publicly — every `/api/adm
 | `ADMIN_EMAIL` | *(set your own)* | Admin login email (seeded on first run) |
 | `ADMIN_PASSWORD` | *(required — no default)* | Admin login password (seeded on first run) |
 | `SESSION_SECRET` | *(required — no default)* | Signs the admin session cookie — set a strong value (`openssl rand -hex 32`) |
-| `DATABASE_URL` | `mysql://user:pass@host:port/novacart` | Full MySQL connection string (overrides the `MYSQL_*` variables) |
-| `MYSQL_HOST` | `localhost` | MySQL host |
-| `MYSQL_PORT` | `3306` | MySQL port |
-| `MYSQL_USER` | `novacart` | MySQL user |
-| `MYSQL_PASSWORD` | `` | MySQL password |
-| `MYSQL_DATABASE` | `novacart` | MySQL database name |
+| `DATABASE_URL` | `postgresql://user:pass@host:5432/novacart` | Full Postgres connection string (overrides the `PG*` variables; add `?sslmode=require` for TLS) |
+| `PGHOST` | `localhost` | Postgres host |
+| `PGPORT` | `5432` | Postgres port |
+| `PGUSER` | `novacart` | Postgres user |
+| `PGPASSWORD` | `` | Postgres password |
+| `PGDATABASE` | `novacart` | Postgres database name |
+| `PGSSL` | `` | `1`/`true`/`required` to connect over TLS |
 | `STORE_EMAIL` | `ADMIN_EMAIL` | Where order-notification emails are sent |
 | `SMTP_HOST` | `` | Outgoing mail server (empty = emails printed to server log) |
 | `SMTP_PORT` | `587` | SMTP port (`465` if `SMTP_SECURE=true`) |
@@ -127,10 +126,10 @@ The admin product form uploads images and videos via `POST /api/admin/upload` (a
 2. In Render, create a **New → Web Service**, select the repository.
 3. Build command: `npm install`
 4. Start command: `node server.js`
-5. Add a MySQL database. Render does not offer a managed MySQL add-on, so use an external provider such as PlanetScale (MySQL-compatible), Railway, or Aiven, and pass its connection string as `DATABASE_URL`.
+5. Add a database. Render offers a managed **PostgreSQL** add-on — create one and paste its internal connection string into `DATABASE_URL`.
 6. Add environment variables: `DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `SESSION_SECRET`.
 
-Thanks to the MySQL session store, any existing admin sessions remain valid after redeploys as long as the database is unchanged.
+Thanks to the PostgreSQL session store, any existing admin sessions remain valid after redeploys as long as the database is unchanged.
 
 The trust proxy setting is enabled and the session cookie is sent as `Secure` only in production (`NODE_ENV=production`, set automatically by Render) over HTTPS.
 

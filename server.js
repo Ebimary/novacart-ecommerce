@@ -6,9 +6,25 @@ const fs = require("fs");
 const crypto = require("crypto");
 const session = require("express-session");
 const bcrypt = require("bcryptjs");
-const mysql = require("mysql2/promise");
+const { Pool, types: pgTypes } = require("pg");
 const nodemailer = require("nodemailer");
 const multer = require("multer");
+
+/* PostgreSQL returns dates as JS Date objects by default. Reformat timestamps
+   to the plain "YYYY-MM-DD HH:MM:SS" shared by the whole storefront (MySQL
+   previously sent the same shape via dateStrings), so every frontend + email
+   date consumer keeps working unchanged. Emitted in the server's local time,
+   exactly like the old MySQL driver did. */
+const pad2 = n => String(n).padStart(2, "0");
+function pgDateParser(value) {
+  if (value == null) return value;
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return value;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ` +
+    `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+pgTypes.setTypeParser(1184, pgDateParser); /* timestamptz */
+pgTypes.setTypeParser(1114, pgDateParser); /* timestamp */
 
 /* ------------------------------------------------------------------ */
 /*  Configuration (all secrets come from environment variables)        */
@@ -49,209 +65,222 @@ function siteBaseUrl() {
   return String(process.env.APP_BASE_URL || process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, "");
 }
 
-/* Database connection settings. Prefer a single DATABASE_URL
-   (e.g. mysql://user:pass@host:port/novacart) or individual
-   MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE.
-   Cloud databases usually require TLS: enable it by adding ?ssl=true (or
-   ssl-mode=required) to DATABASE_URL, or by setting MYSQL_SSL=true. */
+/* PostgreSQL connection settings. Prefer a single DATABASE_URL
+   (e.g. postgresql://user:pass@host:5432/novacart) in production, or the
+   standard PG* variables (PGHOST / PGPORT / PGUSER / PGPASSWORD / PGDATABASE)
+   which the `pg` driver also reads automatically. Cloud databases usually
+   require TLS: enable it by adding ?ssl=true to DATABASE_URL, by setting
+   PGSSL=true, or via PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE + PGSSL. */
 const dbSsl = enabled => (enabled ? { ssl: { rejectUnauthorized: false } } : {});
 
 function dbConfig() {
   if (process.env.DATABASE_URL) {
     const u = new URL(process.env.DATABASE_URL);
     const sslQuery = (u.searchParams.get("ssl") || "").toLowerCase();
-    const sslMode = (u.searchParams.get("ssl-mode") || "").toLowerCase();
+    const sslMode = (u.searchParams.get("sslmode") || "").toLowerCase();
     const sslEnabled =
       sslQuery === "true" || sslQuery === "1" || sslQuery === "preferred" || sslQuery === "required" ||
-      sslMode === "preferred" || sslMode === "required" || sslMode === "verify-ca" || sslMode === "verify-full";
+      sslMode === "preferred" || sslMode === "require" || sslMode === "verify-ca" || sslMode === "verify-full";
     return {
       host: u.hostname,
-      port: Number(u.port || 3306),
+      port: Number(u.port || 5432),
       user: decodeURIComponent(u.username || ""),
       password: decodeURIComponent(u.password || ""),
-      database: (u.pathname.replace(/^\//, "") || DEFAULT_DATABASE).replace(/`/g, ""),
-      connectTimeout: 10000,
+      database: decodeURIComponent(u.pathname.replace(/^\//, "")) || DEFAULT_DATABASE,
+      connectionTimeoutMillis: 10000,
       ...dbSsl(sslEnabled)
     };
   }
-  const sslEnabled = /^(1|true|required|preferred)$/i.test(String(process.env.MYSQL_SSL || ""));
+  const sslEnabled = /^(1|true|required|preferred)$/i.test(String(process.env.PGSSL || ""));
   return {
-    host: process.env.MYSQL_HOST || "localhost",
-    port: Number(process.env.MYSQL_PORT || 3306),
-    user: process.env.MYSQL_USER || "novacart",
-    password: process.env.MYSQL_PASSWORD || "",
-    database: (process.env.MYSQL_DATABASE || DEFAULT_DATABASE).replace(/`/g, ""),
-    connectTimeout: 10000,
+    host: process.env.PGHOST || "localhost",
+    port: Number(process.env.PGPORT || 5432),
+    user: process.env.PGUSER || "novacart",
+    password: process.env.PGPASSWORD || "",
+    database: process.env.PGDATABASE || DEFAULT_DATABASE,
+    connectionTimeoutMillis: 10000,
     ...dbSsl(sslEnabled)
   };
 }
 
 let pool;
 
+/* Best-effort database creation for local development. Hosted PostgreSQL
+   (e.g. Render) usually can't create databases — the DATABASE_URL it provides
+   already points at an existing database, so this being a no-op there is fine. */
+async function ensureDatabase(cfg) {
+  const admin = new Pool({ host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password, ssl: cfg.ssl, database: "postgres", connectionTimeoutMillis: 10000 });
+  try {
+    const res = await admin.query("SELECT 1 FROM pg_database WHERE datname = $1", [cfg.database]);
+    if (res.rowCount === 0) {
+      const dbId = String(cfg.database).replace(/[^a-zA-Z0-9_]/g, "");
+      if (dbId) await admin.query(`CREATE DATABASE "${dbId}"`);
+    }
+  } catch (err) {
+    console.warn("[db] Could not auto-create database (expected on hosted Postgres): " + (err && err.message ? err.message : err));
+  } finally {
+    try { await admin.end(); } catch (_) { }
+  }
+}
+
+/* Parameter placeholders: converts MySQL-style "?" into PostgreSQL "$1..$n". */
+const pgPlaceholders = sql => {
+  let n = 0;
+  return String(sql).replace(/\?/g, () => `$${++n}`);
+};
+
 async function initDatabase() {
   const cfg = dbConfig();
-  const bootstrap = await mysql.createConnection({
-    host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password, charset: "utf8mb4",
-    ...(cfg.ssl ? { ssl: cfg.ssl } : {})
-  });
-  try {
-    await bootstrap.query(
-      `CREATE DATABASE IF NOT EXISTS \`${cfg.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
-    );
-  } finally {
-    await bootstrap.end();
-  }
+  await ensureDatabase(cfg);
 
-  pool = mysql.createPool({
+  pool = new Pool({
     ...cfg,
-    charset: "utf8mb4",
-    timezone: "Z",
-    dateStrings: true,
-    connectionLimit: 10,
-    waitForConnections: true
+    max: 10,
+    idleTimeoutMillis: 30000
   });
 
   /* Schema — created idempotently, existing data is preserved. */
   const schema = [
     `CREATE TABLE IF NOT EXISTS categories (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
        name VARCHAR(80) NOT NULL UNIQUE,
        slug VARCHAR(80) NOT NULL UNIQUE,
        description TEXT,
        image TEXT,
-       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+     )`,
     `CREATE TABLE IF NOT EXISTS products (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
        name VARCHAR(160) NOT NULL,
        category VARCHAR(80) NOT NULL,
-       price INT NOT NULL,
+       price INTEGER NOT NULL,
        image TEXT NOT NULL,
-       video_url TEXT NULL,
-       stock INT NOT NULL DEFAULT 20,
+       video_url TEXT,
+       stock INTEGER NOT NULL DEFAULT 20,
        description TEXT,
-       featured TINYINT(1) NOT NULL DEFAULT 0,
-       rating DECIMAL(3,2) NOT NULL DEFAULT 4.50,
-       is_active TINYINT(1) NOT NULL DEFAULT 1,
-       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       category_id INT NULL,
-       INDEX idx_products_category (category),
-       INDEX idx_products_category_id (category_id),
+       featured BOOLEAN NOT NULL DEFAULT FALSE,
+       rating NUMERIC(3,2) NOT NULL DEFAULT 4.50,
+       is_active BOOLEAN NOT NULL DEFAULT TRUE,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       category_id INTEGER,
        CONSTRAINT fk_products_category FOREIGN KEY (category_id) REFERENCES categories(id)
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)`,
+    `CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id)`,
     `CREATE TABLE IF NOT EXISTS orders (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-       order_number VARCHAR(20) NULL,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+       order_number VARCHAR(20),
        customer VARCHAR(160) NOT NULL,
        email VARCHAR(254) NOT NULL,
-       phone VARCHAR(40) DEFAULT '',
-       address VARCHAR(255) DEFAULT '',
-       city VARCHAR(100) DEFAULT '',
-       state VARCHAR(100) DEFAULT '',
-       country VARCHAR(100) DEFAULT 'Nigeria',
-       subtotal INT NOT NULL DEFAULT 0,
-       delivery_fee INT NOT NULL DEFAULT 0,
-       total INT NOT NULL DEFAULT 0,
-       payment_method VARCHAR(40) DEFAULT 'Cash on Delivery',
+       phone VARCHAR(40) NOT NULL DEFAULT '',
+       address VARCHAR(255) NOT NULL DEFAULT '',
+       city VARCHAR(100) NOT NULL DEFAULT '',
+       state VARCHAR(100) NOT NULL DEFAULT '',
+       country VARCHAR(100) NOT NULL DEFAULT 'Nigeria',
+       subtotal INTEGER NOT NULL DEFAULT 0,
+       delivery_fee INTEGER NOT NULL DEFAULT 0,
+       total INTEGER NOT NULL DEFAULT 0,
+       payment_method VARCHAR(40) NOT NULL DEFAULT 'Cash on Delivery',
        payment_status VARCHAR(20) NOT NULL DEFAULT 'Pending',
        status VARCHAR(20) NOT NULL DEFAULT 'Pending',
-       status_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       tracking_token VARCHAR(64) NULL,
-       shipping_carrier VARCHAR(80) DEFAULT '',
-       tracking_number VARCHAR(120) DEFAULT '',
-       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       INDEX idx_orders_status (status),
-       INDEX idx_orders_payment_status (payment_status),
-       INDEX idx_orders_email (email),
-       INDEX idx_orders_tracking_token (tracking_token)
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+       status_updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       tracking_token VARCHAR(64),
+       shipping_carrier VARCHAR(80) NOT NULL DEFAULT '',
+       tracking_number VARCHAR(120) NOT NULL DEFAULT '',
+       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status)`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_email ON orders(email)`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_tracking_token ON orders(tracking_token)`,
     `CREATE TABLE IF NOT EXISTS order_status_history (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-       order_id INT NOT NULL,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+       order_id INTEGER NOT NULL,
        old_status VARCHAR(20) NOT NULL DEFAULT '',
        new_status VARCHAR(20) NOT NULL DEFAULT '',
        changed_by VARCHAR(254) NOT NULL DEFAULT 'system',
-       note VARCHAR(255) DEFAULT '',
-       changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       INDEX idx_osh_order (order_id),
+       note VARCHAR(255) NOT NULL DEFAULT '',
+       changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
        CONSTRAINT fk_osh_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_osh_order ON order_status_history(order_id)`,
     `CREATE TABLE IF NOT EXISTS order_items (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-       order_id INT NOT NULL,
-       product_id INT NOT NULL,
-       quantity INT NOT NULL,
-       price INT NOT NULL,
-       INDEX idx_order_items_order (order_id),
-       INDEX idx_order_items_product (product_id)
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+       order_id INTEGER NOT NULL,
+       product_id INTEGER NOT NULL,
+       quantity INTEGER NOT NULL,
+       price INTEGER NOT NULL
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_items_product ON order_items(product_id)`,
     `CREATE TABLE IF NOT EXISTS customers (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
        name VARCHAR(160) NOT NULL DEFAULT '',
        email VARCHAR(254) NOT NULL UNIQUE,
-       phone VARCHAR(40) DEFAULT '',
-       address VARCHAR(255) DEFAULT '',
-       city VARCHAR(100) DEFAULT '',
-       state VARCHAR(100) DEFAULT '',
-       country VARCHAR(100) DEFAULT 'Nigeria',
-       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+       phone VARCHAR(40) NOT NULL DEFAULT '',
+       address VARCHAR(255) NOT NULL DEFAULT '',
+       city VARCHAR(100) NOT NULL DEFAULT '',
+       state VARCHAR(100) NOT NULL DEFAULT '',
+       country VARCHAR(100) NOT NULL DEFAULT 'Nigeria',
+       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+     )`,
     `CREATE TABLE IF NOT EXISTS admin_users (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
        email VARCHAR(254) NOT NULL UNIQUE,
        password_hash VARCHAR(255) NOT NULL,
-       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+     )`,
     `CREATE TABLE IF NOT EXISTS sessions (
        sid VARCHAR(128) NOT NULL PRIMARY KEY,
        data TEXT NOT NULL,
        expires_at BIGINT NOT NULL
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+     )`,
     `CREATE TABLE IF NOT EXISTS newsletter_subscribers (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
        email VARCHAR(254) NOT NULL UNIQUE,
        status VARCHAR(20) NOT NULL DEFAULT 'subscribed',
-       unsub_token VARCHAR(64) NOT NULL UNIQUE,
-       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       INDEX idx_newsletter_status (status)
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+       unsub_token VARCHAR(64) NOT NULL,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_newsletter_status ON newsletter_subscribers(status)`,
     `CREATE TABLE IF NOT EXISTS contact_messages (
-       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+       id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
        name VARCHAR(160) NOT NULL DEFAULT '',
        email VARCHAR(254) NOT NULL DEFAULT '',
        subject VARCHAR(200) NOT NULL DEFAULT '',
        message TEXT NOT NULL,
-       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+     )`
   ];
   for (const ddl of schema) await pool.query(ddl);
 
-  await ensureColumn("products", "featured", "featured TINYINT(1) NOT NULL DEFAULT 0");
-  await ensureColumn("products", "video_url", "video_url TEXT NULL");
-  await ensureColumn("products", "rating", "rating DECIMAL(3,2) NOT NULL DEFAULT 4.50");
-  await ensureColumn("products", "is_active", "is_active TINYINT(1) NOT NULL DEFAULT 1");
-  await ensureColumn("products", "created_at", "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
-  await ensureColumn("products", "category_id", "category_id INT NULL");
-  await ensureColumn("orders", "order_number", "order_number VARCHAR(20) NULL");
-  await ensureColumn("orders", "phone", "phone VARCHAR(40) DEFAULT ''");
-  await ensureColumn("orders", "address", "address VARCHAR(255) DEFAULT ''");
-  await ensureColumn("orders", "city", "city VARCHAR(100) DEFAULT ''");
-  await ensureColumn("orders", "state", "state VARCHAR(100) DEFAULT ''");
-  await ensureColumn("orders", "country", "country VARCHAR(100) DEFAULT 'Nigeria'");
-  await ensureColumn("orders", "subtotal", "subtotal INT NOT NULL DEFAULT 0");
-  await ensureColumn("orders", "delivery_fee", "delivery_fee INT NOT NULL DEFAULT 0");
-  await ensureColumn("orders", "payment_method", "payment_method VARCHAR(40) DEFAULT 'Cash on Delivery'");
+  /* Migrations: add columns that older installs may be missing. */
+  await ensureColumn("products", "featured", "featured BOOLEAN NOT NULL DEFAULT FALSE");
+  await ensureColumn("products", "video_url", "video_url TEXT");
+  await ensureColumn("products", "rating", "rating NUMERIC(3,2) NOT NULL DEFAULT 4.50");
+  await ensureColumn("products", "is_active", "is_active BOOLEAN NOT NULL DEFAULT TRUE");
+  await ensureColumn("products", "created_at", "created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP");
+  await ensureColumn("products", "category_id", "category_id INTEGER");
+  await ensureColumn("orders", "order_number", "order_number VARCHAR(20)");
+  await ensureColumn("orders", "phone", "phone VARCHAR(40) NOT NULL DEFAULT ''");
+  await ensureColumn("orders", "address", "address VARCHAR(255) NOT NULL DEFAULT ''");
+  await ensureColumn("orders", "city", "city VARCHAR(100) NOT NULL DEFAULT ''");
+  await ensureColumn("orders", "state", "state VARCHAR(100) NOT NULL DEFAULT ''");
+  await ensureColumn("orders", "country", "country VARCHAR(100) NOT NULL DEFAULT 'Nigeria'");
+  await ensureColumn("orders", "subtotal", "subtotal INTEGER NOT NULL DEFAULT 0");
+  await ensureColumn("orders", "delivery_fee", "delivery_fee INTEGER NOT NULL DEFAULT 0");
+  await ensureColumn("orders", "payment_method", "payment_method VARCHAR(40) NOT NULL DEFAULT 'Cash on Delivery'");
   await ensureColumn("orders", "payment_status", "payment_status VARCHAR(20) NOT NULL DEFAULT 'Pending'");
-  await ensureColumn("orders", "status_updated_at", "status_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
-  await ensureColumn("orders", "tracking_token", "tracking_token VARCHAR(64) NULL");
-  await ensureColumn("orders", "shipping_carrier", "shipping_carrier VARCHAR(80) DEFAULT ''");
-  await ensureColumn("orders", "tracking_number", "tracking_number VARCHAR(120) DEFAULT ''");
+  await ensureColumn("orders", "status_updated_at", "status_updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP");
+  await ensureColumn("orders", "tracking_token", "tracking_token VARCHAR(64)");
+  await ensureColumn("orders", "shipping_carrier", "shipping_carrier VARCHAR(80) NOT NULL DEFAULT ''");
+  await ensureColumn("orders", "tracking_number", "tracking_number VARCHAR(120) NOT NULL DEFAULT ''");
   await ensureColumn("newsletter_subscribers", "status", "status VARCHAR(20) NOT NULL DEFAULT 'subscribed'");
-  await ensureColumn("newsletter_subscribers", "unsub_token", "unsub_token VARCHAR(64) NULL");
-  await ensureColumn("newsletter_subscribers", "updated_at", "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
+  await ensureColumn("newsletter_subscribers", "unsub_token", "unsub_token VARCHAR(64)");
+  await ensureColumn("newsletter_subscribers", "updated_at", "updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP");
 
   /* Backfill one-click unsubscribe tokens for subscribers added before the
      column existed, and normalise statuses. Runs before the UNIQUE constraint
@@ -268,18 +297,20 @@ async function initDatabase() {
      WHERE status NOT IN ('subscribed', 'unsubscribed')`
   );
   /* The column may have been added nullable on legacy tables; enforce
-     uniqueness now (ignored already when the CREATE TABLE declared it). */
+     uniqueness now. A single named index makes this idempotent across
+     reboots. The old ADD CONSTRAINT form is dropped if a legacy install
+     created it (its backing index shares the constraint name). */
   try {
-    const info = await run("ALTER TABLE newsletter_subscribers ADD UNIQUE KEY unsub_token (unsub_token)");
-    if (!Number(info.affectedRows) && !info.warningStatus) { /* not duplicated */ }
-  } catch (err) {
-    if (err && err.code !== "ER_DUP_KEYNAME") throw err;
-  }
+    await run("ALTER TABLE newsletter_subscribers DROP CONSTRAINT IF EXISTS unsub_token");
+  } catch (_) { /* index-only installs */ }
+  await pool.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_newsletter_unsub_token ON newsletter_subscribers(unsub_token)"
+  );
 
   /* Normalise the legacy "Clothes" category and backfill order numbers. */
   await pool.query("UPDATE products SET category = 'Clothing' WHERE category IN ('Clothes', 'CLOTHES')");
   await pool.query(
-    `UPDATE orders SET order_number = CONCAT('NC-', LPAD(id, 6, '0'))
+    `UPDATE orders SET order_number = 'NC-' || LPAD(id::text, 6, '0')
      WHERE order_number IS NULL OR order_number = ''`
   );
 
@@ -304,11 +335,7 @@ async function initDatabase() {
     ["orders", "idx_orders_tracking_token", "tracking_token"],
     ["order_status_history", "idx_osh_order", "order_id"]
   ]) {
-    try {
-      await run(`ALTER TABLE ${table} ADD INDEX ${keyName} (${cols})`);
-    } catch (err) {
-      if (err && err.code !== "ER_DUP_KEYNAME") throw err;
-    }
+    await pool.query(`CREATE INDEX IF NOT EXISTS ${keyName} ON ${table} (${cols})`);
   }
 
   /* Seed default categories. Idempotent: only runs on a fresh install
@@ -341,7 +368,7 @@ async function initDatabase() {
     if (!name) continue;
     let cat = await one("SELECT id FROM categories WHERE LOWER(name) = LOWER(?) OR LOWER(slug) = LOWER(?)", [name, name]);
     if (!cat) {
-      await run("INSERT IGNORE INTO categories(name, slug) VALUES (?, ?)", [name, slugify(name)]);
+      await run("INSERT INTO categories(name, slug) VALUES (?, ?) ON CONFLICT DO NOTHING", [name, slugify(name)]);
       cat = await one("SELECT id FROM categories WHERE LOWER(name) = LOWER(?) OR LOWER(slug) = LOWER(?)", [name, name]);
     }
     if (cat) await run("UPDATE products SET category_id = ? WHERE id = ?", [cat.id, r.id]);
@@ -373,29 +400,35 @@ async function initDatabase() {
   const hash = bcrypt.hashSync(ADMIN_PASSWORD, 12);
   await run(
     `INSERT INTO admin_users(email, password_hash) VALUES (?, ?)
-     ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash)`,
+     ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash`,
     [ADMIN_EMAIL, hash]
   );
 }
 
 /* Query helpers ------------------------------------------------------ */
 async function query(sql, params) {
-  const [rows] = await pool.query(sql, params || []);
-  return rows;
+  const res = await pool.query(pgPlaceholders(sql), params || []);
+  return res.rows;
 }
 async function one(sql, params) {
-  const [rows] = await pool.query(sql, params || []);
+  const rows = await query(sql, params);
   return rows[0];
 }
 async function run(sql, params) {
-  const [result] = await pool.query(sql, params || []);
-  return result;
+  const res = await pool.query(pgPlaceholders(sql), params || []);
+  return { rowCount: res.rowCount, rows: res.rows, command: res.command };
+}
+/* Run an INSERT (or any statement) that must return the created row/columns,
+   e.g. `INSERT ... RETURNING id`. */
+async function insertRow(sql, params) {
+  const res = await pool.query(pgPlaceholders(sql), params || []);
+  return res.rows[0];
 }
 
 async function columnExists(table, column) {
   const rows = await query(
     `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+     WHERE TABLE_SCHEMA = current_schema() AND TABLE_NAME = LOWER($1) AND COLUMN_NAME = LOWER($2)`,
     [table, column]
   );
   return rows.length > 0;
@@ -409,17 +442,20 @@ async function ensureColumn(table, column, ddl) {
 
 /* Run `fn(conn)` inside a transaction, rolling back on error. */
 async function withTx(fn) {
-  const conn = await pool.getConnection();
+  const client = await pool.connect();
+  const conn = {
+    query: (sql, params) => client.query(pgPlaceholders(sql), params || [])
+  };
   try {
-    await conn.beginTransaction();
+    await client.query("BEGIN");
     const out = await fn(conn);
-    await conn.commit();
+    await client.query("COMMIT");
     return out;
   } catch (err) {
-    try { await conn.rollback(); } catch (_) { /* connection may have failed */ }
+    try { await client.query("ROLLBACK"); } catch (_) { /* connection may have failed */ }
     throw err;
   } finally {
-    conn.release();
+    client.release();
   }
 }
 
@@ -1030,23 +1066,28 @@ const uploadVideo = multer({
 });
 
 /* ------------------------------------------------------------------ */
-/*  Session store (MySQL backed so logins survive restarts)            */
+/*  Session store (PostgreSQL backed so logins survive restarts)        */
 /* ------------------------------------------------------------------ */
-class MySQLSessionStore extends session.Store {
+class PostgresSessionStore extends session.Store {
   constructor(database) {
     super();
     this.db = database;
     const sweep = async () => {
-      try { await this.db.query("DELETE FROM sessions WHERE expires_at < ?", [Date.now()]); } catch (_) { /* ignore */ }
+      try { await this.q("DELETE FROM sessions WHERE expires_at < ?", [Date.now()]); } catch (_) { /* ignore */ }
     };
     sweep();
     this._timer = setInterval(sweep, 30 * 60 * 1000);
     if (this._timer.unref) this._timer.unref();
   }
+  /* The store talks to the pool directly, so placeholders must be converted
+     here just like the query helpers do. */
+  q(sql, params) {
+    return this.db.query(pgPlaceholders(sql), params || []);
+  }
   get(sid, cb) {
-    this.db.query("SELECT data, expires_at FROM sessions WHERE sid = ?", [sid])
-      .then(([rows]) => {
-        const row = rows[0];
+    this.q("SELECT data, expires_at FROM sessions WHERE sid = ?", [sid])
+      .then(res => {
+        const row = res.rows[0];
         if (!row) return cb(null, null);
         if (Number(row.expires_at) < Date.now()) return cb(null, null);
         try { cb(null, JSON.parse(row.data)); } catch (err) { cb(err); }
@@ -1057,21 +1098,21 @@ class MySQLSessionStore extends session.Store {
     const expires = sess.cookie && sess.cookie.expires
       ? sess.cookie.expires.getTime()
       : Date.now() + 24 * 60 * 60 * 1000;
-    this.db.query(
+    this.q(
       `INSERT INTO sessions(sid, data, expires_at) VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE data = VALUES(data), expires_at = VALUES(expires_at)`,
+       ON CONFLICT (sid) DO UPDATE SET data = EXCLUDED.data, expires_at = EXCLUDED.expires_at`,
       [sid, JSON.stringify(sess), expires]
     ).then(() => cb && cb(null)).catch(err => cb && cb(err));
   }
   destroy(sid, cb) {
-    this.db.query("DELETE FROM sessions WHERE sid = ?", [sid])
+    this.q("DELETE FROM sessions WHERE sid = ?", [sid])
       .then(() => cb && cb(null)).catch(err => cb && cb(err));
   }
   touch(sid, sess, cb) {
     const expires = sess.cookie && sess.cookie.expires
       ? sess.cookie.expires.getTime()
       : Date.now() + 24 * 60 * 60 * 1000;
-    this.db.query("UPDATE sessions SET expires_at = ? WHERE sid = ?", [expires, sid])
+    this.q("UPDATE sessions SET expires_at = ? WHERE sid = ?", [expires, sid])
       .then(() => cb && cb(null)).catch(err => cb && cb(err));
   }
 }
@@ -1089,7 +1130,7 @@ class MySQLSessionStore extends session.Store {
   app.use(express.json({ limit: "1mb" }));
 
   app.use(session({
-    store: new MySQLSessionStore(pool),
+    store: new PostgresSessionStore(pool),
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
@@ -1161,7 +1202,14 @@ class MySQLSessionStore extends session.Store {
 
   app.get("/api/config", wrap(async (req, res) => {
     const cats = (await query("SELECT name FROM categories ORDER BY id ASC")).map(c => c.name);
-    res.json({ currency: "NGN", deliveryFee: DELIVERY_FEE, freeDeliveryThreshold: FREE_DELIVERY_THRESHOLD, categories: cats });
+    res.json({
+      currency: "NGN",
+      deliveryFee: DELIVERY_FEE,
+      freeDeliveryThreshold: FREE_DELIVERY_THRESHOLD,
+      categories: cats,
+      whatsappNumber: WHATSAPP_NUMBER || "",
+      whatsappUrl: WHATSAPP_NUMBER ? `https://wa.me/${WHATSAPP_NUMBER}` : ""
+    });
   }));
 
   app.get("/api/categories", wrap(async (req, res) => {
@@ -1193,7 +1241,7 @@ class MySQLSessionStore extends session.Store {
 
   app.get("/api/products", wrap(async (req, res) => {
     const { q, category, slug, category_id, sort, min, max, featured, limit } = req.query;
-    const where = ["p.is_active = 1"];
+    const where = ["p.is_active"];
     const params = [];
 
     if (category && category !== "All") {
@@ -1210,14 +1258,14 @@ class MySQLSessionStore extends session.Store {
       params.push(catId);
     }
     if (q) {
-      where.push("(p.name LIKE ? OR c.name LIKE ? OR p.description LIKE ?)");
+      where.push("(p.name ILIKE ? OR c.name ILIKE ? OR p.description ILIKE ?)");
       params.push(`%${q}%`, `%${q}%`, `%${q}%`);
     }
     const minN = Number(min);
     if (Number.isFinite(minN) && minN >= 0) { where.push("p.price >= ?"); params.push(Math.round(minN)); }
     const maxN = Number(max);
     if (Number.isFinite(maxN) && maxN > 0) { where.push("p.price <= ?"); params.push(Math.round(maxN)); }
-    if (featured === "1") where.push("p.featured = 1");
+    if (featured === "1") where.push("p.featured");
 
     const sortMap = {
       newest: "p.id DESC",
@@ -1236,33 +1284,34 @@ class MySQLSessionStore extends session.Store {
     const product = await one(P + " WHERE p.id = ?", [req.params.id]);
     if (!product) return res.json([]);
     const rows = await query(
-      `${P} WHERE p.is_active = 1 AND p.category_id = ? AND p.id != ? ORDER BY p.featured DESC, p.id DESC LIMIT 4`,
+      `${P} WHERE p.is_active AND p.category_id = ? AND p.id != ? ORDER BY p.featured DESC, p.id DESC LIMIT 4`,
       [product.category_id, product.id]
     );
     res.json(rows);
   }));
 
   app.get("/api/products/:id", wrap(async (req, res) => {
-    const product = await one(P + " WHERE p.id = ? AND p.is_active = 1", [req.params.id]);
+    const product = await one(P + " WHERE p.id = ? AND p.is_active", [req.params.id]);
     if (!product) return res.status(404).json({ error: "Product not found." });
     res.json(product);
   }));
 
   app.get("/api/home", wrap(async (req, res) => {
-    const featured = await query(`${P} WHERE p.is_active = 1 AND p.featured = 1 ORDER BY p.id DESC LIMIT 8`);
+    const featured = await query(`${P} WHERE p.is_active AND p.featured ORDER BY p.id DESC LIMIT 8`);
     const categories = await query(`
       SELECT c.id, c.name, c.slug, c.description, c.image,
-        (SELECT COUNT(*) FROM products WHERE category_id = c.id AND is_active = 1) AS count
+        (SELECT COUNT(*) FROM products WHERE category_id = c.id AND is_active) AS count
       FROM categories c ORDER BY c.id ASC`);
     const bestsellers = await query(`
       SELECT p.id, p.name, p.image, p.price, p.rating, p.stock, c.name AS category, c.slug AS category_slug,
-        COALESCE(SUM(oi.quantity), 0) AS sold
+        COALESCE(SUM(oi.quantity), 0)::int AS sold
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN order_items oi ON oi.product_id = p.id
       LEFT JOIN orders o ON o.id = oi.order_id AND o.status != 'Cancelled'
-      WHERE p.is_active = 1
-      GROUP BY p.id ORDER BY sold DESC, p.id DESC LIMIT 4`);
+      WHERE p.is_active
+      GROUP BY p.id, p.name, p.image, p.price, p.rating, p.stock, c.name, c.slug
+      ORDER BY sold DESC, p.id DESC LIMIT 4`);
     res.json({ featured, categories, bestsellers });
   }));
 
@@ -1316,25 +1365,26 @@ class MySQLSessionStore extends session.Store {
       await conn.query(
         `INSERT INTO customers(name, email, phone, address, city, state, country)
          VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE name = VALUES(name), phone = VALUES(phone),
-           address = VALUES(address), city = VALUES(city), state = VALUES(state),
-           country = VALUES(country), updated_at = CURRENT_TIMESTAMP`,
+         ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, phone = EXCLUDED.phone,
+           address = EXCLUDED.address, city = EXCLUDED.city, state = EXCLUDED.state,
+           country = EXCLUDED.country, updated_at = CURRENT_TIMESTAMP`,
         [customerName, customerEmail, customerPhone, customerAddress, customerCity, customerState, customerCountry]
       );
-      const [ordRes] = await conn.query(
+      const ordRes = await conn.query(
         `INSERT INTO orders(order_number, customer, email, phone, address, city, state, country,
            subtotal, delivery_fee, total, payment_method, payment_status, status, tracking_token)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 'Pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 'Pending', ?)
+         RETURNING id`,
         [null, customerName, customerEmail, customerPhone, customerAddress,
          customerCity, customerState, customerCountry, subtotal, delivery, total, method, trackingToken]
       );
-      const oid = ordRes.insertId;
+      const oid = ordRes.rows[0].id;
       for (const { product, qty } of checked) {
         await conn.query(
           "INSERT INTO order_items(order_id, product_id, quantity, price) VALUES (?, ?, ?, ?)",
           [oid, product.id, qty, product.price]
         );
-        await conn.query("UPDATE products SET stock = stock - ? WHERE id = ?", [qty, product.id]);
+        await conn.query("UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?", [qty, product.id, qty]);
       }
       await conn.query("UPDATE orders SET order_number = ? WHERE id = ?", [nextOrderNumber(oid), oid]);
       await conn.query(
@@ -1480,18 +1530,18 @@ class MySQLSessionStore extends session.Store {
       FROM products p
       LEFT JOIN order_items oi ON oi.product_id = p.id
       LEFT JOIN orders o ON o.id = oi.order_id AND o.status != 'Cancelled'
-      GROUP BY p.id ORDER BY sold DESC LIMIT 8`);
+      GROUP BY p.id, p.name, p.image, p.price, p.stock ORDER BY sold DESC LIMIT 8`);
 
     const categoryPerformance = await query(`
       SELECT c.name AS category, COALESCE(SUM(oi.quantity), 0) AS units, COALESCE(SUM(oi.price * oi.quantity), 0) AS revenue
       FROM categories c
-      LEFT JOIN products p ON p.category_id = c.id AND p.is_active = 1
+      LEFT JOIN products p ON p.category_id = c.id AND p.is_active
       LEFT JOIN order_items oi ON oi.product_id = p.id
       LEFT JOIN orders o ON o.id = oi.order_id AND o.status != 'Cancelled'
       GROUP BY c.id, c.name ORDER BY revenue DESC`);
 
     const daily = await query(`
-      SELECT SUBSTR(created_at, 1, 10) AS day, COUNT(*) AS orders,
+      SELECT (created_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS orders,
         COALESCE(SUM(total), 0) AS revenue
       FROM orders WHERE status != 'Cancelled'
       GROUP BY day ORDER BY day DESC LIMIT 30`);
@@ -1764,13 +1814,13 @@ class MySQLSessionStore extends session.Store {
     if (errors.length) return res.status(400).json({ error: errors.join(" ") });
     if (await one("SELECT id FROM products WHERE LOWER(name) = ?", [values.name.toLowerCase()]))
       return res.status(409).json({ error: "A product with this name already exists." });
-    const info = await run(
-      "INSERT INTO products(name, category, category_id, price, image, video_url, stock, description, featured, rating) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    const inserted = await insertRow(
+      "INSERT INTO products(name, category, category_id, price, image, video_url, stock, description, featured, rating) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
       [values.name, values.category, values.category_id, values.price, values.image, values.video_url, values.stock, values.description, values.featured, values.rating]
     );
     res.status(201).json(await one(
       "SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p LEFT JOIN categories c ON c.id = p.category_id WHERE p.id = ?",
-      [info.insertId]
+      [inserted.id]
     ));
   }));
 
@@ -1793,7 +1843,7 @@ class MySQLSessionStore extends session.Store {
 
   app.delete("/api/admin/products/:id", requireAdmin, sameOrigin, wrap(async (req, res) => {
     const info = await run("DELETE FROM products WHERE id = ?", [req.params.id]);
-    if (!info.affectedRows) return res.status(404).json({ error: "Product not found." });
+    if (!info.rowCount) return res.status(404).json({ error: "Product not found." });
     res.json({ ok: true });
   }));
 
@@ -1807,13 +1857,13 @@ class MySQLSessionStore extends session.Store {
   app.post("/api/admin/categories", requireAdmin, sameOrigin, wrap(async (req, res) => {
     const { errors, values } = await validateCategory(req.body);
     if (errors.length) return res.status(400).json({ error: errors.join(" ") });
-    const info = await run(
-      "INSERT INTO categories(name, slug, description, image) VALUES (?, ?, ?, ?)",
+    const inserted = await insertRow(
+      "INSERT INTO categories(name, slug, description, image) VALUES (?, ?, ?, ?) RETURNING id",
       [values.name, values.slug, values.description, values.image]
     );
     res.status(201).json(await one(`
       SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) AS product_count
-      FROM categories c WHERE c.id = ?`, [info.insertId]));
+      FROM categories c WHERE c.id = ?`, [inserted.id]));
   }));
 
   app.put("/api/admin/categories/:id", requireAdmin, sameOrigin, wrap(async (req, res) => {
@@ -1885,7 +1935,7 @@ class MySQLSessionStore extends session.Store {
     const status = String(req.query.status || "").trim();
     const where = [];
     const params = [];
-    if (search) { where.push("email LIKE ?"); params.push(`%${search}%`); }
+    if (search) { where.push("email ILIKE ?"); params.push(`%${search}%`); }
     if (status === "subscribed" || status === "unsubscribed") { where.push("status = ?"); params.push(status); }
     const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
@@ -1896,7 +1946,7 @@ class MySQLSessionStore extends session.Store {
         (SELECT COUNT(*) FROM newsletter_subscribers) AS total,
         (SELECT COUNT(*) FROM newsletter_subscribers WHERE status = 'subscribed') AS active,
         (SELECT COUNT(*) FROM newsletter_subscribers WHERE status = 'unsubscribed') AS unsubscribed,
-        (SELECT COUNT(*) FROM newsletter_subscribers WHERE created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) AS new_this_month`)
+        (SELECT COUNT(*) FROM newsletter_subscribers WHERE created_at >= date_trunc('month', CURRENT_TIMESTAMP)) AS new_this_month`)
     ]);
     res.json({
       stats: {
@@ -1914,13 +1964,13 @@ class MySQLSessionStore extends session.Store {
     if (await one("SELECT id FROM newsletter_subscribers WHERE email = ?", [email])) {
       return res.status(409).json({ error: "This email is already on the list." });
     }
-    const info = await run(
-      "INSERT INTO newsletter_subscribers(email, status, unsub_token) VALUES (?, ?, ?)",
+    const inserted = await insertRow(
+      "INSERT INTO newsletter_subscribers(email, status, unsub_token) VALUES (?, ?, ?) RETURNING id",
       [email, status, crypto.randomBytes(24).toString("hex")]
     );
     res.status(201).json(await one(
       "SELECT id, email, status, created_at, updated_at FROM newsletter_subscribers WHERE id = ?",
-      [info.insertId]
+      [inserted.id]
     ));
   }));
 
@@ -1948,7 +1998,7 @@ class MySQLSessionStore extends session.Store {
 
   app.delete("/api/admin/subscribers/:id", requireAdmin, sameOrigin, wrap(async (req, res) => {
     const info = await run("DELETE FROM newsletter_subscribers WHERE id = ?", [req.params.id]);
-    if (!info.affectedRows) return res.status(404).json({ error: "Subscriber not found." });
+    if (!info.rowCount) return res.status(404).json({ error: "Subscriber not found." });
     res.json({ ok: true });
   }));
 
@@ -2018,11 +2068,11 @@ class MySQLSessionStore extends session.Store {
     ? `${err.name || "AggregateError"}: ${parts.join("; ")}`
     : (err && err.message ? err.message : String(err));
   console.error("Failed to start Marygold Collections: " + summary);
-  if (/ETIMEDOUT|ENETUNREACH|ECONNREFUSED|ENOTFOUND/.test(summary)) {
+  if (/ETIMEDOUT|ENETUNREACH|ECONNREFUSED|ENOTFOUND|SELF_SIGNED_CERT|CERT_HAS_EXPIRED/.test(summary)) {
     console.error(
-      "The app could not reach its MySQL database. Check that DATABASE_URL / MYSQL_HOST, MYSQL_PORT " +
-      "point at an external, internet-accessible MySQL server (Render instances have no local MySQL and " +
-      "localhost/127.0.0.1 will not work). Add ?ssl=true to DATABASE_URL (or MYSQL_SSL=true) if the " +
+      "The app could not reach its PostgreSQL database. Check that DATABASE_URL / PG* variables point at an " +
+      "external, internet-accessible PostgreSQL server (Render instances have no local PostgreSQL and " +
+      "localhost/127.0.0.1 will not work). Add ?sslmode=require to DATABASE_URL (or PGSSL=require) if the " +
       "provider requires TLS, and allowlist Render's egress IPs if the provider uses one."
     );
   }
