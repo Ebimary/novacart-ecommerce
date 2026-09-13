@@ -3,12 +3,14 @@ require("dotenv").config({ quiet: true });
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const crypto = require("crypto");
 const session = require("express-session");
 const bcrypt = require("bcryptjs");
 const { Pool, types: pgTypes } = require("pg");
 const nodemailer = require("nodemailer");
 const multer = require("multer");
+const mediaStorage = require("./storage");
 
 /* PostgreSQL returns dates as JS Date objects by default. Reformat timestamps
    to the plain "YYYY-MM-DD HH:MM:SS" shared by the whole storefront (MySQL
@@ -40,16 +42,33 @@ const WHATSAPP_NUMBER = String(process.env.WHATSAPP_NUMBER || "").replace(/[^0-9
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DEFAULT_DATABASE = "novacart";
 
-/* Outgoing mail. Every field is optional: with no SMTP host configured the
-   emails are written to the server log (handy during development), and once
-   SMTP_HOST is set they are really delivered. */
-const SMTP_HOST = process.env.SMTP_HOST || "";
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_SECURE = process.env.SMTP_SECURE === "true";
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
-const MAIL_FROM = process.env.MAIL_FROM || "Marygold Collections <no-reply@marygoldcollections.com>";
-const STORE_EMAIL = (process.env.STORE_EMAIL || ADMIN_EMAIL).trim().toLowerCase();
+/* Outgoing mail. Both the production naming (EMAIL_*) and the legacy/dev
+   naming (SMTP_* / MAIL_FROM) are recognised — EMAIL_* wins when both are
+   present, so the same code keeps working with the local .env and with the
+   Render environment. With no host configured the emails are written to the
+   server log (handy during development); once a host is set they are really
+   delivered. */
+const BRAND_NAME = String(process.env.STORE_NAME || "NovaCart").trim() || "NovaCart";
+const SMTP_HOST = process.env.EMAIL_HOST || process.env.SMTP_HOST || "";
+const SMTP_PORT = Number(process.env.EMAIL_PORT || process.env.SMTP_PORT || 587);
+const SMTP_SECURE = /^(true|1)$/i.test(String(process.env.EMAIL_SECURE || process.env.SMTP_SECURE || ""));
+const SMTP_USER = process.env.EMAIL_USER || process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.EMAIL_PASSWORD || process.env.SMTP_PASS || "";
+const MAIL_FROM_NAME = String(process.env.EMAIL_FROM_NAME || "").trim();
+const MAIL_FROM = String(process.env.EMAIL_FROM || process.env.MAIL_FROM || "").trim() || defaultFrom();
+const STORE_EMAIL = (process.env.STORE_EMAIL || ADMIN_EMAIL || "").trim().toLowerCase();
+
+/* Reasonable "From" fallback when no explicit EMAIL_FROM / MAIL_FROM is set:
+   use the configured sender name (or the store name) with no-reply@domain. */
+function defaultFrom() {
+  const name = MAIL_FROM_NAME || BRAND_NAME;
+  if (SMTP_USER) {
+    const at = String(SMTP_USER).indexOf("@");
+    const domain = at >= 0 ? String(SMTP_USER).slice(at + 1) : "novacart.app";
+    return `${name} <no-reply@${domain}>`;
+  }
+  return `${name} <no-reply@novacart.app>`;
+}
 
 if (!SESSION_SECRET || SESSION_SECRET === "nova-local-dev-secret-change-me") {
   throw new Error("FATAL: SESSION_SECRET must be set to a strong random value (e.g. openssl rand -hex 32).");
@@ -575,8 +594,11 @@ function mailTransporter() {
   return transporter;
 }
 
-/* Never throws — SMTP problems are logged, not surfaced to callers. */
-async function sendMail({ to, subject, text, html }) {
+/* Never throws — SMTP problems are logged, not surfaced to callers. Emails are
+   sent after the database transaction that created them commits, so a send
+   failure never rolls back the order/subscription. */
+async function sendMail({ to, subject, text, html }, label) {
+  const labelText = label || "Email";
   const dumpDir = process.env.MAIL_WRITE_HTML;
   if (dumpDir) {
     try {
@@ -586,21 +608,20 @@ async function sendMail({ to, subject, text, html }) {
   }
   const t = mailTransporter();
   if (!t) {
-    const label = `[mail::dev]`;
-    console.log(label + ` To: ${to}`);
-    console.log(label + ` Subject: ${subject}`);
-    console.log(label + ` ---`);
-    console.log(`${label} ${String(text).split("\n").join("\n" + label + " ")}`);
-    console.log(label + ` --- (no SMTP_HOST set — configure one to deliver real mail)`);
+    console.log(`[mail::dev] ${labelText} email -> ${to}`);
+    console.log(`[mail::dev] Subject: ${subject}`);
+    console.log(`[mail::dev] ---`);
+    console.log(`[mail::dev] ${String(text).split("\n").join("\n[mail::dev] ")}`);
+    console.log(`[mail::dev] --- (no SMTP_HOST/EMAIL_HOST set — configure one to deliver real mail)`);
     return { sent: false, dev: true };
   }
   try {
     await t.sendMail({ from: MAIL_FROM, to, subject, text, html });
-    console.log(`[mail] Sent ${subject} -> ${to}`);
+    console.log(`[mail] ${labelText} sent successfully -> ${to}`);
     return { sent: true };
   } catch (err) {
-    console.error("[mail] Failed to send email:", err.message);
-    return { sent: false, error: err.message };
+    console.error(`[mail] Email failed (${labelText}):`, err && err.message ? err.message : err);
+    return { sent: false, error: err && err.message ? err.message : String(err) };
   }
 }
 
@@ -640,16 +661,16 @@ function paymentTone(order) {
    emails stay visually consistent. All styles are inline for mail clients. */
 function mailShell({ title, content, unsubscribeUrl = "", footerNote = "" }) {
   const foot = unsubscribeUrl
-    ? `You're receiving this because you subscribed to Marygold Collections updates.<br>
+    ? `You're receiving this because you subscribed to ${BRAND_NAME} updates.<br>
        <a href="${unsubscribeUrl}" style="color:#ffffff;text-decoration:underline">Unsubscribe</a> from these emails`
     : (footerNote ||
-       "Marygold Collections updates — new arrivals, exclusive offers and style inspiration.");
+       `${BRAND_NAME} updates — new arrivals, exclusive offers and style inspiration.`);
   return `<div style="background-color:#f6f1eb;padding:36px 14px;">
     <div style="max-width:600px;margin:0 auto;font-family:Georgia,serif,Arial,sans-serif;color:#1c1917;">
       <div style="text-align:center;padding:6px 0 22px;">
         <a href="${siteBaseUrl()}" style="text-decoration:none;color:inherit;">
           <div style="font-size:34px;font-weight:700;letter-spacing:.5px;line-height:1;">
-            Marygold<span style="color:${BRAND_ACCENT};font-style:italic;">Collections</span>
+            ${BRAND_NAME}
           </div>
         </a>
         <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:2.6px;text-transform:uppercase;color:#8a837c;margin-top:9px;">
@@ -661,12 +682,12 @@ function mailShell({ title, content, unsubscribeUrl = "", footerNote = "" }) {
       </div>
       <div style="text-align:center;padding:28px 10px 8px;font-family:Arial,Helvetica,sans-serif;font-size:12.5px;color:#8a837c;line-height:1.7;">
         <div style="font-family:Georgia,serif;font-size:17px;font-weight:700;color:#57534e;">
-          Marygold Collections <span style="color:${BRAND_ACCENT};">&middot;</span>
+          ${BRAND_NAME} <span style="color:${BRAND_ACCENT};">&middot;</span>
         </div>
         <div style="margin-top:6px;">WhatsApp: +234 915 259 5695 &middot; Victoria Island, Lagos, Nigeria</div>
         <div style="margin-top:14px;">${foot}</div>
         <div style="height:1px;background:#eadfd3;margin:18px 0 14px;"></div>
-        &copy; ${new Date().getFullYear()} Marygold Collections. All rights reserved.
+        &copy; ${new Date().getFullYear()} ${BRAND_NAME}. All rights reserved.
       </div>
     </div>
   </div>`;
@@ -675,23 +696,33 @@ function mailShell({ title, content, unsubscribeUrl = "", footerNote = "" }) {
 function welcomeMail({ email, token }) {
   const unsubscribeUrl = `${siteBaseUrl()}/unsubscribe?token=${encodeURIComponent(token)}`;
   const text =
-    `Hi there,\n\n` +
-    `Thanks for subscribing to Marygold Collections updates! You'll be the first to hear about new arrivals, exclusive deals and fresh drops.\n\n` +
+    `Welcome to ${BRAND_NAME}!\n\n` +
+    `You're officially subscribed to our newsletter.\n\n` +
+    `You'll receive:\n` +
+    `- New product updates\n` +
+    `- Special offers\n` +
+    `- Promotions\n` +
+    `- ${BRAND_NAME} news\n\n` +
     `Shop the latest collection: ${siteBaseUrl()}/shop\n\n` +
     `If you no longer wish to receive these emails, you can unsubscribe here: ${unsubscribeUrl}\n\n` +
-    `— The Marygold Collections Team`;
+    `— The ${BRAND_NAME} Team`;
   const html = mailShell({
     title: "You're on the list",
     unsubscribeUrl,
     content:
-      `<h1 style="font-family:Georgia,serif;font-size:24px;margin:0 0 14px;line-height:1.25;">Welcome to the Marygold Collections list, you're official.</h1>
+      `<h1 style="font-family:Georgia,serif;font-size:24px;margin:0 0 14px;line-height:1.25;">Welcome to ${BRAND_NAME}!</h1>
        <p style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.7;margin:0 0 8px;">
-         Thanks for subscribing! As a member of the Marygold Collections list you'll get first access to new arrivals,
-         subscriber-only offers and the pieces we think you'll love.
+         You're officially subscribed to our newsletter.
        </p>
-       <p style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.7;margin:0 0 26px;">
-         Keep an eye on your inbox &mdash; the next drop is worth the wait.
+       <p style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.7;margin:0 0 22px;">
+         You'll receive:
        </p>
+       <ul style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.9;margin:0 0 26px;padding-left:20px;">
+         <li>New product updates</li>
+         <li>Special offers</li>
+         <li>Promotions</li>
+         <li>${BRAND_NAME} news</li>
+       </ul>
        <a href="${siteBaseUrl()}/shop" style="display:inline-block;background:${BRAND_ACCENT};color:#ffffff;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-weight:700;font-size:14px;padding:14px 28px;border-radius:999px;box-shadow:0 4px 14px rgba(180,83,9,.28);">Shop the collection&nbsp;&rsaquo;</a>
        <p style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#8a837c;margin-top:26px;">
          Premium fashion, footwear, accessories &amp; jewelry &middot; fast delivery across Nigeria.
@@ -699,7 +730,7 @@ function welcomeMail({ email, token }) {
   });
   return {
     to: email,
-    subject: "You're subscribed to Marygold Collections 🛍",
+    subject: `Welcome to ${BRAND_NAME}! You're on the list 🛍`,
     text,
     html
   };
@@ -707,7 +738,7 @@ function welcomeMail({ email, token }) {
 
 function newSubscriberMail({ email, totalCount, activeCount, isResubscribe }) {
   const text =
-    `${email} just ${isResubscribe ? "re-subscribed to" : "subscribed to"} the Marygold Collections newsletter.\n` +
+    `${email} just ${isResubscribe ? "re-subscribed to" : "subscribed to"} the ${BRAND_NAME} newsletter.\n` +
     `Total subscribers: ${totalCount}\nActive subscribers: ${activeCount}\n\n` +
     `Manage subscribers: ${siteBaseUrl()}/admin#subscribers`;
   const html = mailShell({
@@ -716,7 +747,7 @@ function newSubscriberMail({ email, totalCount, activeCount, isResubscribe }) {
       `<h1 style="font-family:Georgia,serif;font-size:22px;margin:0 0 12px;line-height:1.3;">New newsletter ${isResubscribe ? "re-subscription" : "subscriber"} 🎉</h1>
        <p style="font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#292524;margin:0 0 6px;">${htmlEscape(email)}</p>
        <p style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#8a837c;margin:0 0 22px;">
-         ${isResubscribe ? "They have re-joined the list." : "They have joined the Marygold Collections list."}<br>
+         ${isResubscribe ? "They have re-joined the list." : "They have joined the " + BRAND_NAME + " list."}<br>
          ${totalCount} total &middot; ${activeCount} active subscribers
        </p>
        <a href="${siteBaseUrl()}/admin#subscribers" style="display:inline-block;background:#1c1917;color:#ffffff;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-weight:700;font-size:14px;padding:13px 26px;border-radius:999px;">View subscribers</a>`
@@ -733,8 +764,38 @@ function unsubscribedMail({ email }) {
   return {
     to: STORE_EMAIL,
     subject: `Newsletter unsubscribe — ${email}`,
-    text: `${email} unsubscribed from the Marygold Collections newsletter.\n\nManage subscribers: ${siteBaseUrl()}/admin#subscribers`
+    text: `${email} unsubscribed from the ${BRAND_NAME} newsletter.\n\nManage subscribers: ${siteBaseUrl()}/admin#subscribers`
   };
+}
+
+/* Branded newsletter broadcast used by the admin "Send newsletter" feature.
+   Each subscriber gets an individual email carrying their own unsubscribe
+   link, so recipients never see one another's address. */
+function newsletterCampaignMail({ email, unsubToken, subject, message }) {
+  const base = siteBaseUrl();
+  const unsubscribeUrl = `${base}/unsubscribe?token=${encodeURIComponent(unsubToken)}`;
+  const paragraphs = String(message || "").trim()
+    .split(/\r?\n{2,}/)
+    .map(p => `<p style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.7;margin:0 0 14px;">${htmlEscape(p).replace(/\r?\n/g, "<br>")}</p>`)
+    .join("");
+  const text =
+    `${subject}\n\n` +
+    String(message || "").trim() + "\n\n" +
+    `— The ${BRAND_NAME} Team\n\n` +
+    `You're receiving this because you subscribed to ${BRAND_NAME} updates.\n` +
+    `Unsubscribe: ${unsubscribeUrl}`;
+  const html = mailShell({
+    title: subject,
+    unsubscribeUrl,
+    content:
+      `<div style="text-align:center;margin-bottom:20px;">${emailPill("Newsletter", "info")}</div>` +
+      `<h1 style="font-family:Georgia,serif;font-size:26px;margin:0 0 14px;line-height:1.25;">${htmlEscape(subject)}</h1>` +
+      paragraphs +
+      `<p style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#8a837c;margin-top:20px;line-height:1.6;">` +
+      `You're receiving this because you subscribed to ${BRAND_NAME} updates. ` +
+      `<a href="${unsubscribeUrl}" style="color:${BRAND_ACCENT};text-decoration:underline;">Unsubscribe</a></p>`
+  });
+  return { to: email, subject, text, html };
 }
 
 /* Human-friendly payment label. A COD order awaiting collection must read as
@@ -795,7 +856,7 @@ function carrierTrackUrl(carrier, trackingNumber) {
    is not configured so nothing broken renders before it is set. */
 function whatsappHelpUrl(message) {
   if (!WHATSAPP_NUMBER) return "";
-  return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(message || "Hi Marygold Collections! I have a question about my order.")}`;
+  return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(message || `Hi ${BRAND_NAME}! I have a question about my order.`)}`;
 }
 
 function orderSummaryBlock(order, items) {
@@ -836,7 +897,7 @@ function orderFactsBlock(order) {
     </tr>
     <tr>
       <td style="padding:13px 14px;border:1px solid #eadfd3;border-top:0;border-radius:0 0 0 12px;background:#faf9f7;"><b style="color:#1c1917">Order status</b><br style="line-height:1" />${emailPill(String(order.status || "Pending"), statusTone(order.status))}</td>
-      <td style="padding:13px 14px;border:1px solid #eadfd3;border-top:0;border-left:0;border-radius:0 0 12px 0;background:#faf9f7;"><b style="color:#1c1917">Delivery</b><br style="line-height:1" /><span style="font-size:14.5px;color:#292524">${order.delivery_fee ? naira(order.delivery_fee) : "Free"} &middot; ${htmlEscape(order.shipping_carrier || "Marygold Collections courier")}</span></td>
+      <td style="padding:13px 14px;border:1px solid #eadfd3;border-top:0;border-left:0;border-radius:0 0 12px 0;background:#faf9f7;"><b style="color:#1c1917">Delivery</b><br style="line-height:1" /><span style="font-size:14.5px;color:#292524">${order.delivery_fee ? naira(order.delivery_fee) : "Free"} &middot; ${htmlEscape(order.shipping_carrier || BRAND_NAME + " courier")}</span></td>
     </tr>
   </table>`;
 }
@@ -864,7 +925,7 @@ function orderNotificationMail(order, items, trackingUrl) {
     `Customer tracking page: ${trackingUrl}`;
   const html = mailShell({
     title: `New order ${order.order_number}`,
-    footerNote: "This is an automated order notification for the Marygold Collections store team.",
+    footerNote: "This is an automated order notification for the " + BRAND_NAME + " store team.",
     content:
       `<h1 style="font-family:Georgia,serif;font-size:24px;margin:0 0 16px;line-height:1.25;">New order ${htmlEscape(order.order_number)}</h1>
        <p style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.7;margin:0 0 4px;">
@@ -884,22 +945,24 @@ function orderNotificationMail(order, items, trackingUrl) {
 function orderConfirmationMail(order, items, trackingUrl) {
   const text =
     `Hi ${order.customer},\n\n` +
-    `Thanks for your order ${order.order_number}! We're preparing it now.\n\n` +
+    `Thank you for your order!\n` +
+    `Your ${BRAND_NAME} order ${order.order_number} has been received successfully and is currently ${order.status || "Pending"}.\n\n` +
     `Placed: ${new Date(order.created_at).toLocaleString("en-GB", { day: "numeric", month: "short", year: "numeric" })}\n` +
     `Payment method: ${order.payment_method}\nPayment status: ${paymentLabel(order)}\nOrder status: ${order.status}\n\n` +
     `Items:\n${(items || []).map(it => `- ${it.product_name} x${it.quantity} — ${naira(Number(it.price) * Number(it.quantity))}`).join("\n")}\n` +
     `\nSubtotal: ${naira(order.subtotal)}\nDelivery: ${order.delivery_fee ? naira(order.delivery_fee) : "FREE"}\n` +
     `Total: ${naira(order.total)}\n\n` +
     `Follow your order live: ${trackingUrl}\n\n` +
-    `— The Marygold Collections Team`;
+    `— The ${BRAND_NAME} Team`;
   const html = mailShell({
     title: `Order ${order.order_number} confirmed`,
-    footerNote: "This email is about your recent Marygold Collections order.",
+    footerNote: "This email is about your recent " + BRAND_NAME + " order.",
     content:
       `<div style="text-align:center;margin-bottom:22px;">${emailPill(order.status, statusTone(order.status))}</div>
-       <h1 style="font-family:Georgia,serif;font-size:26px;margin:0 0 12px;line-height:1.25;">Thanks for your order, ${htmlEscape(order.customer.split(" ")[0])}!</h1>
+       <h1 style="font-family:Georgia,serif;font-size:26px;margin:0 0 12px;line-height:1.25;">Thank you for your order, ${htmlEscape(order.customer.split(" ")[0])}!</h1>
        <p style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.7;margin:0 0 4px;">
-         Your order <b>${htmlEscape(order.order_number)}</b> has been placed successfully.
+         Your <b>${BRAND_NAME}</b> order <b>${htmlEscape(order.order_number)}</b> has been received successfully
+         and is currently <b>${htmlEscape(order.status || "Pending")}</b>.
          We'll email you at every step as it's processed and shipped.
        </p>
        ${trackButtonHtml(trackingUrl)}
@@ -909,43 +972,43 @@ function orderConfirmationMail(order, items, trackingUrl) {
          Questions? Reply to this email or reach us on WhatsApp and we'll help you out.
        </p>`
   });
-  return { to: order.email, subject: `Your Marygold Collections order ${order.order_number} is confirmed`, text, html };
+  return { to: order.email, subject: `Your ${BRAND_NAME} order ${order.order_number} is confirmed`, text, html };
 }
 
 /* Customer notification on an order-status change. Only ever called with a
-   genuinely new status. Subjects/messages follow the documented Marygold Collections
+   genuinely new status. Subjects/messages follow the documented ${BRAND_NAME}
    templates; the shipped and cancelled variants include extra specifics. */
 function orderStatusMail(order, items, trackingUrl) {
   const orderNo = order.order_number;
   const conf = {
     Confirmed: {
-      subject: `Your Marygold Collections Order ${orderNo} Has Been Confirmed`,
+      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Confirmed`,
       heading: "Your order is confirmed",
       copy: "Your order has been confirmed and is now moving forward."
     },
     Processing: {
-      subject: `Your Marygold Collections Order ${orderNo} Is Being Prepared`,
+      subject: `Your ${BRAND_NAME} Order ${orderNo} Is Being Prepared`,
       heading: "We're preparing your order",
       copy: "Your order is now being prepared. We'll let you know the moment it ships."
     },
     Shipped: {
-      subject: `Your Marygold Collections Order ${orderNo} Has Shipped`,
+      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Shipped`,
       heading: "Your order is on the way",
-      copy: "Good news — your order has been shipped and is on its way to you."
+      copy: "Good news — your order has been shipped and is currently on its way to you."
     },
     Delivered: {
-      subject: `Your Marygold Collections Order ${orderNo} Has Been Delivered`,
+      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Delivered`,
       heading: "Your order has been delivered",
-      copy: "Your order has been delivered. Thank you for shopping with Marygold Collections — we hope you love it!"
+      copy: "Your order has been delivered. Thank you for shopping with ${BRAND_NAME} — we hope you love it!"
     },
     Cancelled: {
-      subject: `Your Marygold Collections Order ${orderNo} Has Been Cancelled`,
+      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Cancelled`,
       heading: "Your order has been cancelled",
       copy: "Your order has been cancelled."
     }
   };
   const t = conf[order.status] || {
-    subject: `Your Marygold Collections Order ${orderNo}`,
+    subject: `Your ${BRAND_NAME} Order ${orderNo}`,
     heading: order.status,
     copy: "Your order status has been updated."
   };
@@ -959,12 +1022,12 @@ function orderStatusMail(order, items, trackingUrl) {
     const trackingNumber = String(order.tracking_number || "").trim();
     const trackUrl = carrierTrackUrl(carrier, trackingNumber);
     if (carrier || trackingNumber) {
-      const shipmentLine = `Shipping carrier: ${carrier || "Marygold Collections courier"}${trackingNumber ? `\nTracking number: ${trackingNumber}` : ""}${trackUrl ? `\nTrack your shipment: ${trackUrl}` : ""}`;
+      const shipmentLine = `Shipping carrier: ${carrier || BRAND_NAME + " courier"}${trackingNumber ? `\nTracking number: ${trackingNumber}` : ""}${trackUrl ? `\nTrack your shipment: ${trackUrl}` : ""}`;
       shipBlockText = `\n${shipmentLine}\n\n`;
       shipBlockHtml = `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#44403c;margin-top:22px;">
         <tr><td style="padding:16px 18px;border:1px solid #eadfd3;border-radius:12px;background:#faf9f7;">
           <div style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#1c1917;margin-bottom:2px;">On its way to you</div>
-          <div style="font-size:13.5px;color:#57534e;margin:0 0 8px;">${htmlEscape(carrier || "Marygold Collections courier")}${trackingNumber ? ` &middot; <b>${htmlEscape(trackingNumber)}</b>` : ""}</div>
+          <div style="font-size:13.5px;color:#57534e;margin:0 0 8px;">${htmlEscape(carrier || BRAND_NAME + " courier")}${trackingNumber ? ` &middot; <b>${htmlEscape(trackingNumber)}</b>` : ""}</div>
           ${trackUrl ? `<a href="${trackUrl}" style="color:${BRAND_ACCENT};font-weight:700;text-decoration:none;">Track your shipment&nbsp;&rsaquo;</a>` : ""}
         </td></tr>
       </table>`;
@@ -1004,11 +1067,11 @@ function orderStatusMail(order, items, trackingUrl) {
     `Order total: ${naira(order.total)}\nPayment: ${order.payment_method} (${paymentLabel(order)})\n\n` +
     `${shipBlockText}${refundBlockText}` +
     `${cancelled ? "" : `Follow your order live: ${trackingUrl}\n\n`}` +
-    `— The Marygold Collections Team`;
+    `— The ${BRAND_NAME} Team`;
 
   const html = mailShell({
     title: `Order ${orderNo} — ${order.status}`,
-    footerNote: "This email is about your recent Marygold Collections order.",
+    footerNote: "This email is about your recent " + BRAND_NAME + " order.",
     content:
       `<div style="text-align:center;margin-bottom:22px;">${emailPill(order.status, statusTone(order.status))}</div>
        <h1 style="font-family:Georgia,serif;font-size:26px;margin:0 0 10px;line-height:1.25;">${t.heading}</h1>
@@ -1031,39 +1094,78 @@ function orderStatusMail(order, items, trackingUrl) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Uploads (admin product images / videos, stored under public/)      */
+/*  Uploads (admin product images / videos).                           */
+/*  Files are staged briefly under the OS temp dir, then either pushed */
+/*  to persistent object storage (production; S3_* configured) or put  */
+/*  under public/uploads for localhost. The database only ever stores  */
+/*  the final permanent URL.                                           */
 /* ------------------------------------------------------------------ */
 const UPLOAD_DIR = path.join(__dirname, "public", "uploads");
+const UPLOAD_TMP = path.join(os.tmpdir(), "novacart-uploads");
 
-function uploadStorage(kind) {
+const UPLOAD_IMAGE_EXTS = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp" };
+const UPLOAD_VIDEO_EXTS = { ".mp4": "video/mp4", ".webm": "video/webm" };
+
+function uploadStorage() {
   return multer.diskStorage({
-    destination: (req, file, cb) => cb(null, path.join(UPLOAD_DIR, kind)),
+    destination: (req, file, cb) => {
+      fs.mkdirSync(UPLOAD_TMP, { recursive: true });
+      cb(null, UPLOAD_TMP);
+    },
     filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname || "").toLowerCase().replace(/[^a-z0-9.]/g, "") || (kind === "videos" ? ".mp4" : ".jpg");
+      const ext = path.extname(file.originalname || "").toLowerCase();
       cb(null, `${Date.now()}-${crypto.randomBytes(6).toString("hex")}${ext}`);
     }
   });
 }
 function uploadFileFilter(kind) {
+  /* Validate extension AND MIME together — neither is trusted alone.   */
   return (req, file, cb) => {
-    const isImage = /^image\/(jpeg|png|gif|webp)$/.test(file.mimetype);
-    const isVideo = /^video\/(mp4|webm|quicktime|x-matroska)$/.test(file.mimetype);
-    if (kind === "videos" ? isVideo : isImage) return cb(null, true);
-    cb(new Error(kind === "videos"
-      ? "Only MP4, WebM or MOV video files are allowed."
-      : "Only JPG, PNG, GIF or WebP image files are allowed."));
+    const exts = kind === "videos" ? UPLOAD_VIDEO_EXTS : UPLOAD_IMAGE_EXTS;
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    const wants = kind === "videos" ? "MP4 or WebM video" : "JPEG, PNG or WebP image";
+    if (!(ext in exts)) return cb(new Error(`Only ${wants} files are allowed.`));
+    const mime = String(file.mimetype || "").toLowerCase();
+    if (exts[ext] !== mime) return cb(new Error(`File contents do not match a valid ${wants} file.`));
+    cb(null, true);
   };
 }
 const uploadImage = multer({
-  storage: uploadStorage("images"),
+  storage: uploadStorage(),
   limits: { fileSize: 8 * 1024 * 1024 },
   fileFilter: uploadFileFilter("images")
 });
 const uploadVideo = multer({
-  storage: uploadStorage("videos"),
+  storage: uploadStorage(),
   limits: { fileSize: 200 * 1024 * 1024 },
   fileFilter: uploadFileFilter("videos")
 });
+
+/* Persists a staged multer file to object storage (S3 mode) or
+   public/uploads (localhost mode) and resolves to the permanent URL.
+   The temporary file is always removed afterwards. */
+function finalizeUpload(file, kind) {
+  return new Promise((resolve, reject) => {
+    const removeTmp = () => { try { fs.unlinkSync(file.path); } catch (_) { /* ignore */ } };
+    const key = file.filename;
+    if (mediaStorage.isS3()) {
+      const stream = fs.createReadStream(file.path);
+      mediaStorage.put({ key, kind, size: file.size, stream, contentType: String(file.mimetype || "").toLowerCase() })
+        .then(res => { removeTmp(); resolve(res.url); })
+        .catch(err => { removeTmp(); reject(err); });
+    } else {
+      const dir = path.join(UPLOAD_DIR, kind);
+      fs.mkdirSync(dir, { recursive: true });
+      /* copy (not rename): the temp dir may be a different filesystem than
+         public/uploads (e.g. /tmp is tmpfs), where rename would EXDEV */
+      fs.copyFile(file.path, path.join(dir, key), err => {
+        removeTmp();
+        if (err) return reject(err);
+        resolve(`/uploads/${kind}/${key}`);
+      });
+    }
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /*  Session store (PostgreSQL backed so logins survive restarts)        */
@@ -1125,6 +1227,35 @@ class PostgresSessionStore extends session.Store {
 
   fs.mkdirSync(path.join(UPLOAD_DIR, "images"), { recursive: true });
   fs.mkdirSync(path.join(UPLOAD_DIR, "videos"), { recursive: true });
+
+  /* Boot-time email diagnostics — helpful on Render where the variables are
+     supplied by the dashboard. Cleartext credentials are never printed. */
+  console.log(`[mail] SMTP ${SMTP_HOST ? "configured (" + SMTP_HOST + ":" + SMTP_PORT + ")" : "NOT configured — emails will be logged, not delivered"}`);
+  console.log(`[mail] From: ${MAIL_FROM}`);
+  console.log(`[mail] Base URL for email links: ${siteBaseUrl()}`);
+  if (process.env.NODE_ENV === "production" && !SMTP_HOST) {
+    console.warn("[mail] WARNING: no SMTP_HOST/EMAIL_HOST set in production — no real emails will be delivered.");
+  }
+  if (process.env.NODE_ENV === "production" && /localhost|127\.0\.0\.1/.test(siteBaseUrl())) {
+    console.warn("[mail] WARNING: APP_BASE_URL looks like localhost in production — email tracking links will be unusable.");
+  }
+
+  /* Boot-time media-storage diagnostics. Object storage (S3_) keeps product
+     images/videos alive across Render restarts and redeploys; the local
+     filesystem does not. Credentials are never printed. */
+  console.log(`[storage] Media storage: ${mediaStorage.describe()}`);
+  mediaStorage.check()
+    .then(state => {
+      if (state === "bucket OK") console.log(`[storage] Bucket reachable and ready.`);
+      else if (mediaStorage.isS3()) console.warn(`[storage] WARNING: S3 storage ${state}` +
+        " — uploads will fail until the endpoint/bucket is reachable.");
+    })
+    .catch(() => { /* the route itself reports upload failures */ });
+  if (process.env.NODE_ENV === "production" && !mediaStorage.isS3()) {
+    console.warn("[storage] WARNING: running production with LOCAL media storage — uploaded images/videos live on " +
+      "this instance's ephemeral disk and will be lost after a restart or redeploy. Configure the S3_* variables " +
+      "(see .env.example) so product media persists in object storage.");
+  }
 
   app.set("trust proxy", 1);
   app.use(express.json({ limit: "1mb" }));
@@ -1400,8 +1531,8 @@ class PostgresSessionStore extends session.Store {
       [orderId]
     );
     const trackingUrl = `${siteBaseUrl()}/track-order?token=${encodeURIComponent(order.tracking_token || "")}`;
-    sendMail(orderNotificationMail(order, orderItems, trackingUrl));
-    sendMail(orderConfirmationMail(order, orderItems, trackingUrl));
+    sendMail(orderNotificationMail(order, orderItems, trackingUrl), "Store order notification");
+    sendMail(orderConfirmationMail(order, orderItems, trackingUrl), "Order confirmation email");
     res.status(201).json({ order: publicOrderPayload(order), items: orderItems, tracking_url: trackingUrl });
   }));
 
@@ -1447,10 +1578,10 @@ class PostgresSessionStore extends session.Store {
     }
 
     const sub = await one("SELECT id, email, status, unsub_token FROM newsletter_subscribers WHERE email = ?", [email]);
-    sendMail(welcomeMail(sub));
+    sendMail(welcomeMail(sub), "Newsletter welcome email");
     const totalRow = await one("SELECT COUNT(*) AS n FROM newsletter_subscribers");
     const activeRow = await one("SELECT COUNT(*) AS n FROM newsletter_subscribers WHERE status = 'subscribed'");
-    sendMail(newSubscriberMail({ email, totalCount: Number(totalRow.n), activeCount: Number(activeRow.n), isResubscribe }));
+    sendMail(newSubscriberMail({ email, totalCount: Number(totalRow.n), activeCount: Number(activeRow.n), isResubscribe }), "New-subscriber alert");
     res.json({ ok: true, already: false, resubscribed: isResubscribe, total: Number(totalRow.n) });
   }));
 
@@ -1461,7 +1592,7 @@ class PostgresSessionStore extends session.Store {
     if (existing.status === "unsubscribed") return res.json({ ok: true, already: true });
 
     await run("UPDATE newsletter_subscribers SET status = 'unsubscribed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [existing.id]);
-    sendMail(unsubscribedMail(existing));
+    sendMail(unsubscribedMail(existing), "Unsubscribe alert");
     res.json({ ok: true, email: existing.email });
   }));
 
@@ -1653,7 +1784,7 @@ class PostgresSessionStore extends session.Store {
     const trackingUrl = `${siteBaseUrl()}/track-order?token=${encodeURIComponent(existing.tracking_token || "")}`;
     let email = { sent: false, skipped: true };
     if (["Confirmed", "Processing", "Shipped", "Delivered", "Cancelled"].includes(status)) {
-      email = await sendMail(orderStatusMail({ ...existing, status }, items, trackingUrl));
+      email = await sendMail(orderStatusMail({ ...existing, status }, items, trackingUrl), "Status update email");
     }
     const detail = await adminOrderDetail(existing.id);
     res.json({ ...detail, updated: true, old_status: oldStatus, email });
@@ -1797,7 +1928,12 @@ class PostgresSessionStore extends session.Store {
     uploader.single("file")(req, res, err => {
       if (err) return res.status(400).json({ error: err.message });
       if (!req.file) return res.status(400).json({ error: "No file received." });
-      res.status(201).json({ url: `/uploads/${kind}/${req.file.filename}` });
+      finalizeUpload(req.file, kind)
+        .then(url => res.status(201).json({ url }))
+        .catch(uploadErr => {
+          console.error("[upload] failed to persist media:", uploadErr && uploadErr.message ? uploadErr.message : uploadErr);
+          res.status(500).json({ error: "Upload failed. Please try again." });
+        });
     });
   });
 
@@ -1842,8 +1978,16 @@ class PostgresSessionStore extends session.Store {
   }));
 
   app.delete("/api/admin/products/:id", requireAdmin, sameOrigin, wrap(async (req, res) => {
+    const existing = await one("SELECT image, video_url FROM products WHERE id = ?", [req.params.id]);
     const info = await run("DELETE FROM products WHERE id = ?", [req.params.id]);
     if (!info.rowCount) return res.status(404).json({ error: "Product not found." });
+    if (existing) {
+      for (const url of [existing.image, existing.video_url]) {
+        if (url) mediaStorage.remove(url).catch(err => {
+          console.warn("[upload] failed to remove stored media:", err && err.message ? err.message : err);
+        });
+      }
+    }
     res.json({ ok: true });
   }));
 
@@ -2002,6 +2146,73 @@ class PostgresSessionStore extends session.Store {
     res.json({ ok: true });
   }));
 
+  /* Newsletter broadcast. Sends individually (concurrency-limited) so no
+     subscriber ever sees another subscriber's address in To/Cc/Bcc. A failed
+     send is reported, never blocking the remaining recipients, and subscribers
+     are never removed from the database because of a mail error. */
+  app.post("/api/admin/newsletter/send", requireAdmin, sameOrigin, wrap(async (req, res) => {
+    const subject = String(req.body.subject || "").trim();
+    const message = String(req.body.message || "").trim();
+    const testOnly = req.body.test === true;
+    if (!subject || subject.length > 150) {
+      return res.status(400).json({ error: "A subject between 1 and 150 characters is required." });
+    }
+    if (message.length < 2 || message.length > 40000) {
+      return res.status(400).json({ error: "The newsletter message must be between 2 and 40,000 characters." });
+    }
+
+    if (testOnly) {
+      const to = (req.session.admin && req.session.admin.email) || STORE_EMAIL;
+      const result = await sendMail(
+        newsletterCampaignMail({ email: to, unsubToken: "__test__", subject, message }),
+        "Newsletter test email"
+      );
+      return res.json({
+        ok: true, test: true, to,
+        sent: result.sent ? 1 : 0, failed: result.sent ? 0 : 1,
+        email: result
+      });
+    }
+
+    const subscribers = await query(
+      "SELECT id, email, unsub_token FROM newsletter_subscribers WHERE status = 'subscribed' ORDER BY id ASC"
+    );
+    if (!subscribers.length) {
+      return res.status(400).json({ error: "There are no active subscribers to send to yet." });
+    }
+
+    const results = { total: subscribers.length, sent: 0, failed: 0, failures: [] };
+    const CONCURRENCY = 5;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < subscribers.length) {
+        const sub = subscribers[cursor++];
+        try {
+          const out = await sendMail(
+            newsletterCampaignMail({ email: sub.email, unsubToken: sub.unsub_token, subject, message }),
+            "Newsletter"
+          );
+          if (out.sent) results.sent += 1;
+          else {
+            results.failed += 1;
+            results.failures.push({ email: sub.email, error: out.error || "send failed" });
+          }
+        } catch (err) {
+          results.failed += 1;
+          results.failures.push({ email: sub.email, error: err && err.message ? err.message : String(err) });
+        }
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(CONCURRENCY, subscribers.length) },
+      () => worker()
+    );
+    await Promise.all(workers);
+
+    console.log(`[newsletter] Broadcast "${subject}" -> ${results.sent}/${results.total} sent, ${results.failed} failed`);
+    res.json({ ok: true, results });
+  }));
+
   app.post("/api/admin/password", requireAdmin, sameOrigin, wrap(async (req, res) => {
     const current = String(req.body.current || "");
     const next = String(req.body.password || "");
@@ -2042,6 +2253,16 @@ class PostgresSessionStore extends session.Store {
   });
 
   /* ------------------------------------------------------------------ */
+  /*  Customer order tracking page                                       */
+  /*  Explicit routes (also covered by the static middleware below) so a  */
+  /*  missing extension can never 404 in production. The page reads the   */
+  /*  secure token from the query string and talks to /api/track-order.   */
+  /* ------------------------------------------------------------------ */
+  app.get(["/track-order", "/track-order.html"], (req, res) => {
+    res.sendFile(path.join(__dirname, "public", "track-order.html"));
+  });
+
+  /* ------------------------------------------------------------------ */
   /*  Static files + friendly error pages                                */
   /* ------------------------------------------------------------------ */
   app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
@@ -2058,7 +2279,7 @@ class PostgresSessionStore extends session.Store {
     res.status(500).sendFile(path.join(__dirname, "public", "500.html"));
   });
 
-  app.listen(PORT, () => console.log(`Marygold Collections running at http://localhost:${PORT}`));
+  app.listen(PORT, () => console.log(`${BRAND_NAME} running at http://localhost:${PORT}`));
 })().catch(err => {
   const parts = [];
   if (err && Array.isArray(err.errors) && err.errors.length) {

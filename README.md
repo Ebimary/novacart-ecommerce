@@ -106,6 +106,15 @@ This project deliberately exposes **no** admin data publicly — every `/api/adm
 | `PGPASSWORD` | `` | Postgres password |
 | `PGDATABASE` | `novacart` | Postgres database name |
 | `PGSSL` | `` | `1`/`true`/`required` to connect over TLS |
+| `S3_BUCKET` | `` | Object-storage bucket for product images/videos (set = uploads use S3-compatible storage) |
+| `S3_REGION` | `us-east-1` | Object-storage region |
+| `S3_ACCESS_KEY_ID` | `` | Object-storage access key |
+| `S3_SECRET_ACCESS_KEY` | `` | Object-storage secret key |
+| `S3_ENDPOINT` | `s3.amazonaws.com` | S3-compatible endpoint (R2/B2/Spaces/MinIO) |
+| `S3_ENDPOINT_SSL` | auto | `true`/`false` (auto-detected from the `S3_ENDPOINT` scheme) |
+| `S3_FORCE_PATH_STYLE` | `false` | `true` for R2, Backblaze B2 and MinIO |
+| `S3_PUBLIC_URL` | `` | Public URL prefix for stored media (stored in PostgreSQL and rendered on the storefront) |
+| `S3_UPLOAD_PREFIX` | `` | Optional key prefix, e.g. `products` |
 | `STORE_EMAIL` | `ADMIN_EMAIL` | Where order-notification emails are sent |
 | `SMTP_HOST` | `` | Outgoing mail server (empty = emails printed to server log) |
 | `SMTP_PORT` | `587` | SMTP port (`465` if `SMTP_SECURE=true`) |
@@ -118,7 +127,15 @@ This project deliberately exposes **no** admin data publicly — every `/api/adm
 Subscribers receive a confirmation email when they join the newsletter (and the store owner is emailed about every new subscription), and the store owner (`STORE_EMAIL`, defaulting to `ADMIN_EMAIL`) receives an email with the full customer and item breakdown for every new order. To actually deliver mail, set `SMTP_HOST` (plus `SMTP_USER`/`SMTP_PASS` — e.g. a Gmail app password). With no `SMTP_HOST`, the emails are written to the server log so local development still shows exactly what would be sent.
 
 ### Product image / video uploads
-The admin product form uploads images and videos via `POST /api/admin/upload` (admin session required). Files land in `public/uploads/{images,videos}` and are served from `/uploads/...`. On Render (or any ephemeral host) uploads live for the life of the instance — for persistent production storage connect a CDN/object store instead.
+The admin product form uploads images and videos via `POST /api/admin/upload` (admin session required). Files are validated strictly (extension + MIME matched, JPEG/PNG/WebP images, MP4/WebM videos, 8 MB image / 200 MB video cap) and stored under safe generated filenames.
+
+**Where files live:**
+- When the `S3_*` variables are configured the files are pushed to S3-compatible **object storage** (AWS S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces, MinIO, ...). PostgreSQL then stores the permanent public URL (`S3_PUBLIC_URL` + object key), so product images/videos survive page refreshes, Render restarts, sleep/wake cycles, instance replacement and new deployments.
+- Without `S3_*`, files fall back to `public/uploads` (matching localhost development). That local folder is git-ignored and **ephemeral on Render** — the server prints a warning at boot when production is running without S3. Set the `S3_*` variables for persistent production storage.
+
+Delete a product and its S3 objects are cleaned up automatically (best effort).
+
+**Existing products.** Existing database rows are never touched. Products whose image already points at `/uploads/...` were saved from a stale local disk — on Render those files no longer exist. Re-upload the photo from the admin (Edit product → choose image → Save) and the record updates to a permanent S3 URL. Seed products use external image URLs and are unaffected.
 
 ## Deploying on Render
 
@@ -128,6 +145,10 @@ The admin product form uploads images and videos via `POST /api/admin/upload` (a
 4. Start command: `node server.js`
 5. Add a database. Render offers a managed **PostgreSQL** add-on — create one and paste its internal connection string into `DATABASE_URL`.
 6. Add environment variables: `DATABASE_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `SESSION_SECRET`.
+
+7. **Persistent product media (required for production).** Create an object-storage bucket (e.g. AWS S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces) and add the `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_ENDPOINT` (per-provider, see `.env.example`), `S3_FORCE_PATH_STYLE`, `S3_PUBLIC_URL` env vars. Without them, admin-uploaded images/videos live on Render's ephemeral disk and disappear after a restart or redeploy.
+
+8. Add the email vars from the section above: `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USER`, `EMAIL_PASSWORD`, `EMAIL_FROM`, `EMAIL_FROM_NAME`, and `APP_BASE_URL=https://<your-service>.onrender.com`.
 
 Thanks to the PostgreSQL session store, any existing admin sessions remain valid after redeploys as long as the database is unchanged.
 

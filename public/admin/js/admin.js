@@ -841,6 +841,7 @@
       $("subUnsub").textContent = data.stats.unsubscribed;
       $("subNew").textContent = data.stats.newThisMonth;
       $("subResult").textContent = `${data.stats.active} active · ${data.stats.unsubscribed} unsubscribed`;
+      if ($("nlActiveHint")) $("nlActiveHint").textContent = `${data.stats.active} active`;
 
       renderSubscribers();
     } catch (err) { showError(err.message); }
@@ -933,6 +934,58 @@
       })();
     }
   });
+
+  /* ---------------- Newsletter broadcast ---------------- */
+  const sendNewsletter = testOnly => {
+    const subject = ($("nlSubject") ? $("nlSubject").value : "").trim();
+    const message = ($("nlMessage") ? $("nlMessage").value : "").trim();
+    const errEl = $("nlError");
+    const msg = $("nlMsg");
+    if (errEl) errEl.classList.remove("show");
+    if (msg) msg.className = "form-msg";
+    if (!subject || !message) {
+      if (errEl) { errEl.textContent = "Please enter both a subject and a message."; errEl.classList.add("show"); }
+      return;
+    }
+    const activeCount = $("subActive") ? $("subActive").textContent : "all";
+    if (testOnly) {
+      if (!confirm("Send a test of this newsletter to your admin email?")) return;
+    } else if (!confirm(`Send this newsletter to ${activeCount} active subscriber(s)? Each receives it individually.`)) {
+      return;
+    }
+    const btn = testOnly ? $("nlTestBtn") : $("nlSendBtn");
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = testOnly ? "Sending test…" : "Sending…";
+    api("/api/admin/newsletter/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subject, message, test: testOnly })
+    })
+      .then(data => {
+        if (msg) {
+          if (testOnly) {
+            msg.textContent = data.sent
+              ? `Test email sent successfully to ${data.to || "you"}.`
+              : "Test email failed — check the server log for the error.";
+          } else {
+            const r = data.results || {};
+            msg.textContent = `Sent to ${r.sent || 0} of ${r.total || 0} subscriber(s).${r.failed ? ` ${r.failed} failed — see the server log.` : ""}`;
+          }
+          msg.className = "form-msg ok";
+        }
+      })
+      .catch(err => {
+        if (msg) { msg.textContent = err.message; msg.className = "form-msg err"; }
+      })
+      .finally(() => {
+        btn.disabled = false;
+        btn.textContent = original;
+      });
+  };
+
+  if ($("nlTestBtn")) $("nlTestBtn").addEventListener("click", () => sendNewsletter(true));
+  if ($("nlSendBtn")) $("nlSendBtn").addEventListener("click", () => sendNewsletter(false));
 
   /* ---------------- Settings ---------------- */
   async function loadSettings() {
