@@ -93,7 +93,9 @@
         cart.save();
         cart.refreshBadge();
         const orderId = data.order && data.order.id;
-        location.href = "/confirmation?order=" + orderId + "&email=" + encodeURIComponent(payload.email);
+        const es = data.email_status || {};
+        const emailOk = es.customer && es.customer.sent ? "1" : "0";
+        location.href = "/confirmation?order=" + orderId + "&email=" + encodeURIComponent(payload.email) + "&email_ok=" + emailOk;
       })
       .catch(err => {
         submitting = false;

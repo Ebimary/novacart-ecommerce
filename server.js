@@ -53,10 +53,23 @@ const SMTP_HOST = process.env.EMAIL_HOST || process.env.SMTP_HOST || "";
 const SMTP_PORT = Number(process.env.EMAIL_PORT || process.env.SMTP_PORT || 587);
 const SMTP_SECURE = /^(true|1)$/i.test(String(process.env.EMAIL_SECURE || process.env.SMTP_SECURE || ""));
 const SMTP_USER = process.env.EMAIL_USER || process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.EMAIL_PASSWORD || process.env.SMTP_PASS || "";
+/* Gmail App Passwords are typically copied with spaces (e.g. "abcd efgh ijkl
+   mnop"), but Gmail only accepts the 16 alphanumeric characters. All
+   whitespace is stripped before the secret reaches Nodemailer. */
+const SMTP_PASS = normalizeSecret(process.env.EMAIL_PASSWORD || process.env.SMTP_PASS || "");
 const MAIL_FROM_NAME = String(process.env.EMAIL_FROM_NAME || "").trim();
 const MAIL_FROM = String(process.env.EMAIL_FROM || process.env.MAIL_FROM || "").trim() || defaultFrom();
-const STORE_EMAIL = (process.env.STORE_EMAIL || ADMIN_EMAIL || "").trim().toLowerCase();
+const STORE_EMAIL = (process.env.STORE_EMAIL || process.env.OWNER_EMAIL || ADMIN_EMAIL || "").trim().toLowerCase();
+
+/* Strips surrounding and internal whitespace from a secret value. Never logs
+   the value. Safe for Gmail App Passwords (letters/digits only). */
+function normalizeSecret(value) {
+  return String(value == null ? "" : value).trim().replace(/\s+/g, "");
+}
+
+function smtpConfigured() {
+  return Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS);
+}
 
 /* Reasonable "From" fallback when no explicit EMAIL_FROM / MAIL_FROM is set:
    use the configured sender name (or the store name) with no-reply@domain. */
@@ -78,10 +91,19 @@ if (!ADMIN_PASSWORD || ADMIN_PASSWORD === "admin123") {
 }
 
 /* Absolute base URL used for links in emails (order tracking, unsubscribe,
-   etc). Defaults to localhost; set APP_BASE_URL (or BASE_URL) on any
-   deployed host. */
+   etc). Resolution order: APP_BASE_URL → RENDER_EXTERNAL_URL →
+   RENDER_EXTERNAL_HOSTNAME (both supplied by Render at runtime) → BASE_URL →
+   localhost development fallback. Never generates localhost links in
+   production unless nothing else is available. */
 function siteBaseUrl() {
-  return String(process.env.APP_BASE_URL || process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, "");
+  const candidates = [
+    process.env.APP_BASE_URL,
+    process.env.RENDER_EXTERNAL_URL,
+    process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : "",
+    process.env.BASE_URL
+  ];
+  const found = candidates.find(v => String(v || "").trim().startsWith("http"));
+  return String(found || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, "");
 }
 
 /* PostgreSQL connection settings. Prefer a single DATABASE_URL
@@ -589,14 +611,90 @@ function mailTransporter() {
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: SMTP_SECURE,
+    /* Port 587 (default) uses STARTTLS. Require TLS even when the server
+       doesn't advertise it so a message can never silently go out in
+       cleartext. TLS 1.2 minimum matches current Gmail requirements. */
+    requireTLS: !SMTP_SECURE,
+    tls: { minVersion: "TLSv1.2" },
     auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined
   });
   return transporter;
 }
 
+let mailVerifyState = null;   /* boot + on-demand; never contains secrets */
+
+function mailConfigSummary() {
+  return {
+    configured: smtpConfigured(),
+    host: SMTP_HOST || "",
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    user_configured: Boolean(SMTP_USER),
+    password_configured: Boolean(SMTP_PASS),
+    from: MAIL_FROM,
+    production_base_url: siteBaseUrl()
+  };
+}
+
+/* Safe, credential-free SMTP error text: the password (if set) is redacted and
+   the message is trimmed so Render logs never leak secrets. */
+function safeMailError(err) {
+  if (err === undefined || err === null) return "SMTP connection error (no details)";
+  let msg = err && err.message ? String(err.message) : String(err);
+  if (SMTP_PASS) {
+    try { msg = msg.split(SMTP_PASS).join("***"); } catch (_) { /* ignore */ }
+  }
+  if (msg.length > 300) msg = msg.slice(0, 300) + "…";
+  return msg;
+}
+
+/* Resolve a promise but never let it hang past `ms`. Emails, verifications and
+   the checkout response must stay fast even when SMTP is slow or unreachable. */
+function boundedPromise(promise, ms, label) {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve({ sent: false, error: `${label} timed out after ${ms}ms` }), ms);
+    Promise.resolve(promise).then(
+      r => { clearTimeout(timer); resolve(r); },
+      e => { clearTimeout(timer); resolve({ sent: false, error: safeMailError(e) }); }
+    );
+  });
+}
+
+/* Non-blocking SMTP hello/verify. Safe result only. Never prevents the web
+   server from starting — email problems are logged clearly instead. */
+async function verifyMail() {
+  const t = mailTransporter();
+  if (!t) {
+    mailVerifyState = { configured: false, ok: false, error: "SMTP not configured", checkedAt: Date.now() };
+    return mailVerifyState;
+  }
+const result = await boundedPromise(t.verify(), 12000, "SMTP verification");
+  if (result === true || (result && result.sent === true)) {
+    mailVerifyState = { configured: true, ok: true, error: null, host: SMTP_HOST, port: SMTP_PORT, checkedAt: Date.now() };
+    console.log(`[mail] SMTP verification: SUCCESS (${SMTP_HOST}:${SMTP_PORT})`);
+  } else {
+    mailVerifyState = { configured: true, ok: false, error: safeMailError(result && result.error), host: SMTP_HOST, port: SMTP_PORT, checkedAt: Date.now() };
+    console.error(`[mail] SMTP verification FAILED (${SMTP_HOST}:${SMTP_PORT}): ${mailVerifyState.error}`);
+  }
+  return mailVerifyState;
+}
+
+/* Truthful per-email result shape for API responses. Never reveals secrets. */
+function emailStatusResult(r) {
+  return {
+    sent: r && r.sent === true,
+    dev: !!(r && r.dev),
+    messageId: (r && r.messageId) || null,
+    rejected: (r && r.rejected && r.rejected.length) ? r.rejected : [],
+    error: (r && r.sent) ? null : ((r && r.error) || null)
+  };
+}
+
 /* Never throws — SMTP problems are logged, not surfaced to callers. Emails are
    sent after the database transaction that created them commits, so a send
-   failure never rolls back the order/subscription. */
+   failure never rolls back the order/subscription. Returns a truthful result
+   ({sent, messageId, accepted, rejected[, error]}) so callers and the API
+   never claim success when SMTP rejected the message. */
 async function sendMail({ to, subject, text, html }, label) {
   const labelText = label || "Email";
   const dumpDir = process.env.MAIL_WRITE_HTML;
@@ -613,15 +711,20 @@ async function sendMail({ to, subject, text, html }, label) {
     console.log(`[mail::dev] ---`);
     console.log(`[mail::dev] ${String(text).split("\n").join("\n[mail::dev] ")}`);
     console.log(`[mail::dev] --- (no SMTP_HOST/EMAIL_HOST set — configure one to deliver real mail)`);
-    return { sent: false, dev: true };
+    return { sent: false, dev: true, messageId: null, accepted: [], rejected: [] };
   }
+  console.log(`[mail] Sending ${labelText} -> ${to}`);
   try {
-    await t.sendMail({ from: MAIL_FROM, to, subject, text, html });
-    console.log(`[mail] ${labelText} sent successfully -> ${to}`);
-    return { sent: true };
+    const info = await t.sendMail({ from: MAIL_FROM, to, subject, text, html });
+    const messageId = info && info.messageId ? String(info.messageId) : "";
+    const accepted = (info && info.accepted) || [];
+    const rejected = (info && info.rejected) || [];
+    console.log(`[mail] ${labelText} accepted -> ${to}${messageId ? ` messageId=${messageId}` : ""}`);
+    return { sent: true, messageId, accepted, rejected };
   } catch (err) {
-    console.error(`[mail] Email failed (${labelText}):`, err && err.message ? err.message : err);
-    return { sent: false, error: err && err.message ? err.message : String(err) };
+    console.error(`[mail] ${labelText} FAILED -> ${to}`);
+    console.error(`[mail] SMTP error: ${safeMailError(err)}`);
+    return { sent: false, messageId: null, accepted: [], rejected: [], error: safeMailError(err) };
   }
 }
 
@@ -999,7 +1102,7 @@ function orderStatusMail(order, items, trackingUrl) {
     Delivered: {
       subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Delivered`,
       heading: "Your order has been delivered",
-      copy: "Your order has been delivered. Thank you for shopping with ${BRAND_NAME} — we hope you love it!"
+      copy: `Your order has been delivered. Thank you for shopping with ${BRAND_NAME} — we hope you love it!`
     },
     Cancelled: {
       subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Cancelled`,
@@ -1230,15 +1333,25 @@ class PostgresSessionStore extends session.Store {
 
   /* Boot-time email diagnostics — helpful on Render where the variables are
      supplied by the dashboard. Cleartext credentials are never printed. */
-  console.log(`[mail] SMTP ${SMTP_HOST ? "configured (" + SMTP_HOST + ":" + SMTP_PORT + ")" : "NOT configured — emails will be logged, not delivered"}`);
+  const mailCfg = mailConfigSummary();
+  console.log(`[mail] SMTP config ${mailCfg.configured ? "detected" : "NOT detected — emails will be logged, not delivered"}`);
+  if (mailCfg.configured) {
+    console.log(`[mail] SMTP host: ${mailCfg.host}`);
+    console.log(`[mail] SMTP port: ${mailCfg.port}`);
+    console.log(`[mail] SMTP user: configured`);
+    console.log(`[mail] SMTP password: configured`);
+  }
   console.log(`[mail] From: ${MAIL_FROM}`);
   console.log(`[mail] Base URL for email links: ${siteBaseUrl()}`);
-  if (process.env.NODE_ENV === "production" && !SMTP_HOST) {
-    console.warn("[mail] WARNING: no SMTP_HOST/EMAIL_HOST set in production — no real emails will be delivered.");
+  if (process.env.NODE_ENV === "production" && !mailCfg.configured) {
+    console.warn("[mail] WARNING: SMTP is not fully configured in production — no real emails will be delivered. " +
+      "Set EMAIL_HOST / EMAIL_USER / EMAIL_PASSWORD on Render (SMTP_* names are accepted as aliases).");
   }
   if (process.env.NODE_ENV === "production" && /localhost|127\.0\.0\.1/.test(siteBaseUrl())) {
-    console.warn("[mail] WARNING: APP_BASE_URL looks like localhost in production — email tracking links will be unusable.");
+    console.warn("[mail] WARNING: base URL looks like localhost in production — set APP_BASE_URL or confirm " +
+      "Render provides RENDER_EXTERNAL_URL so email tracking links are usable.");
   }
+  verifyMail();   /* non-blocking; logs SUCCESS/FAILED and never blocks startup */
 
   /* Boot-time media-storage diagnostics. Object storage (S3_) keeps product
      images/videos alive across Render restarts and redeploys; the local
@@ -1531,9 +1644,40 @@ class PostgresSessionStore extends session.Store {
       [orderId]
     );
     const trackingUrl = `${siteBaseUrl()}/track-order?token=${encodeURIComponent(order.tracking_token || "")}`;
-    sendMail(orderNotificationMail(order, orderItems, trackingUrl), "Store order notification");
-    sendMail(orderConfirmationMail(order, orderItems, trackingUrl), "Order confirmation email");
-    res.status(201).json({ order: publicOrderPayload(order), items: orderItems, tracking_url: trackingUrl });
+    console.log(`[order] Created ${order.order_number}`);
+
+    /* Emails are attempted AFTER the order transaction commits and never block
+       or roll back the order. Each send is independent — a customer-email
+       failure does not stop the owner alert and vice versa. */
+    /* Emails are attempted AFTER the order transaction commits and never block
+       or roll back the order. Each send is independent — a customer-email
+       failure does not stop the owner alert and vice versa. A 12s cap keeps
+       the checkout response bounded even when SMTP is slow or unreachable. */
+    const customerPromise = boundedPromise(
+      sendMail(orderConfirmationMail(order, orderItems, trackingUrl), `Customer confirmation for ${order.order_number}`),
+      12000, "Customer confirmation"
+    );
+    let ownerPromise;
+    if (STORE_EMAIL) {
+      ownerPromise = boundedPromise(
+        sendMail(orderNotificationMail(order, orderItems, trackingUrl), `Owner notification for ${order.order_number}`),
+        12000, "Owner notification"
+      );
+    } else {
+      console.error(`[mail] Owner notification FAILED for ${order.order_number}: no store owner email configured (STORE_EMAIL/OWNER_EMAIL)`);
+      ownerPromise = Promise.resolve({ sent: false, error: "no store owner email configured" });
+    }
+    const [customerMailResult, ownerMailResult] = await Promise.all([customerPromise, ownerPromise]);
+
+    res.status(201).json({
+      order: publicOrderPayload(order),
+      items: orderItems,
+      tracking_url: trackingUrl,
+      email_status: {
+        customer: emailStatusResult(customerMailResult),
+        owner: emailStatusResult(ownerMailResult)
+      }
+    });
   }));
 
   app.get("/api/orders/:id", wrap(async (req, res) => {
@@ -1838,6 +1982,64 @@ class PostgresSessionStore extends session.Store {
     );
     const detail = await adminOrderDetail(existing.id);
     res.json({ ...detail, updated: true, message: "Shipping information saved." });
+  }));
+
+  /* Mail diagnostics + admin test-send. Both are admin-protected and never
+     return SMTP credentials (password / app-password are only "configured"). */
+  app.get("/api/admin/email-status", requireAdmin, wrap(async (req, res) => {
+    const cfg = mailConfigSummary();
+    let verification = mailVerifyState;
+    if (!verification || !verification.checkedAt || Date.now() - verification.checkedAt > 10 * 60 * 1000) {
+      verification = await verifyMail();
+    }
+    res.json({
+      configured: cfg.configured,
+      host: cfg.host,
+      port: cfg.port,
+      secure: cfg.secure,
+      user_configured: cfg.user_configured,
+      password_configured: cfg.password_configured,
+      from: cfg.from,
+      verification: verification.ok ? "success" : (cfg.configured ? "failure" : "not-configured"),
+      verification_error: verification.ok ? null : (verification.error || null),
+      production_base_url: cfg.production_base_url
+    });
+  }));
+
+  app.post("/api/admin/test-email", requireAdmin, sameOrigin, wrap(async (req, res) => {
+    const to = String((req.body && req.body.to) || "").trim().toLowerCase();
+    const recipient = EMAIL_RE.test(to) ? to : STORE_EMAIL;
+    const subject = `${BRAND_NAME} test email`;
+    const text =
+      `This is a test email from ${BRAND_NAME}.\n\n` +
+      `If you're reading this, SMTP is configured correctly and ${BRAND_NAME} can deliver email from the server.\n\n` +
+      `Production base URL: ${siteBaseUrl()}\n` +
+      `Sent: ${new Date().toISOString()}`;
+    const html = mailShell({
+      title: "Test email",
+      footerNote: "This is an automated test message from the " + BRAND_NAME + " admin settings.",
+      content:
+        `<h1 style="font-family:Georgia,serif;font-size:24px;margin:0 0 12px;line-height:1.25;">SMTP test</h1>
+         <p style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#44403c;line-height:1.7;margin:0;">
+           This is a test email from <b>${BRAND_NAME}</b>.
+         </p>
+         <p style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#57534e;line-height:1.7;margin:18px 0 0;">
+           Production base URL: ${htmlEscape(siteBaseUrl())}<br>
+           Sent: ${new Date().toISOString()}
+         </p>`
+    });
+    const result = await sendMail({ to: recipient, subject, text, html }, "Test email (admin)");
+    if (result.sent) {
+      res.json({ success: true, message: "Test email accepted by SMTP server", to: recipient, email: emailStatusResult(result) });
+    } else {
+      res.json({
+        success: false,
+        message: result.dev ? "SMTP is not configured on this server" : "Email delivery failed",
+        to: recipient,
+        error: result.dev ? null : (result.error || "unknown SMTP error"),
+        email: emailStatusResult(result)
+      });
+    }
   }));
 
   /* ------------------------------------------------------------------ */

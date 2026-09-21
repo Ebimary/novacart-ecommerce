@@ -16,12 +16,18 @@
     }
   }
 
+  function emailLine(email, emailOk) {
+    if (emailOk === "1") return `A confirmation email has been sent to <b>${helpers.esc(email)}</b>.`;
+    if (emailOk === "0") return `We couldn't confirm delivery of the confirmation email just now, but your order is saved and you can track it below.`;
+    return `Your order has been placed successfully.`;
+  }
+
   function markup(o) {
     return `
       <div class="confirm-hero">
         <div class="check-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg></div>
         <h1>Thank you, ${helpers.esc(o.customer.split(" ")[0])}!</h1>
-        <p>Your order has been placed successfully. A confirmation email is on its way to <b>${helpers.esc(o.email)}</b>.</p>
+        <p>${emailLine(o.email || email, q.email_ok)}</p>
       </div>
 
       <div class="order-card">

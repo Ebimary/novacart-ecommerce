@@ -1000,12 +1000,66 @@
   if ($("nlSendBtn")) $("nlSendBtn").addEventListener("click", () => sendNewsletter(false));
 
   /* ---------------- Settings ---------------- */
+  function loadMailStatus() {
+    const mount = $("mailMeta");
+    if (!mount) return;
+    api("/api/admin/email-status")
+      .then(st => {
+        const rows = [
+          ["SMTP configured", st.configured ? "Yes" : "No"],
+          ["SMTP host", st.host || "—"],
+          ["SMTP port", String(st.port || "—")],
+          ["SMTP user", st.user_configured ? "configured" : "not configured"],
+          ["SMTP password", st.password_configured ? "configured" : "not configured"],
+          ["SMTP verification", st.verification],
+          ["Production base URL", st.production_base_url || "—"]
+        ];
+        mount.innerHTML = rows.map(([k, v]) =>
+          `<div style="display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-bottom:1px solid var(--adline)"><b>${esc(k)}</b><span style="color:#57534e;word-break:break-all;text-align:right">${esc(v)}</span></div>`
+        ).join("");
+        if (st.verification_error) {
+          mount.innerHTML += `<p style="color:#b91c1c;font-size:13px;margin:10px 0 0">Verification error: ${esc(st.verification_error)}</p>`;
+        }
+      })
+      .catch(err => { mount.innerHTML = `<p style="color:#b91c1c;font-size:13.5px">${esc(err.message)}</p>`; });
+  }
+
   async function loadSettings() {
     try {
       const me = await api("/api/admin/me");
       $("adminEmail").textContent = "Signed in as " + me.email;
     } catch (err) { showError(err.message); }
+    loadMailStatus();
   }
+
+  if ($("mailRefreshBtn")) $("mailRefreshBtn").addEventListener("click", loadMailStatus);
+  if ($("testEmailBtn")) $("testEmailBtn").addEventListener("click", async () => {
+    const btn = $("testEmailBtn");
+    const msg = $("testEmailMsg");
+    if (!msg) return;
+    btn.disabled = true;
+    msg.className = "form-msg";
+    msg.textContent = "Sending test email…";
+    try {
+      const data = await api("/api/admin/test-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      if (data.success) {
+        msg.textContent = `${data.message}${data.to ? ` (to ${data.to})` : ""}.`;
+        msg.className = "form-msg ok";
+      } else {
+        msg.textContent = `${data.message}${data.error ? ": " + data.error : ""}.`;
+        msg.className = "form-msg err";
+      }
+    } catch (err) {
+      msg.textContent = err.message;
+      msg.className = "form-msg err";
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   $("passwordForm").addEventListener("submit", async e => {
     e.preventDefault();

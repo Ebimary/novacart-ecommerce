@@ -201,6 +201,21 @@
           Default local credentials are documented in the README. In production they are overridden by the <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> environment variables on Render.
         </p>
       </div>
+      <div class="panel form-panel" style="margin-top:22px">
+        <div class="panel-head"><h2>Email delivery (SMTP)</h2></div>
+        <p style="color:var(--admuted);font-size:13.5px;margin:-6px 0 16px;line-height:1.7">
+          Live check that the store can actually deliver email — order confirmations, status updates and newsletters.
+          SMTP credentials are never shown.
+        </p>
+        <div class="setting-form">
+          <div id="mailMeta" style="font-size:13.5px;line-height:1.9;color:#44403c"></div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px">
+            <button class="tbtn" type="button" id="mailRefreshBtn">Refresh</button>
+            <button class="btn-accent admin-active" type="button" id="testEmailBtn">Send Test Email</button>
+          </div>
+          <p class="form-msg" id="testEmailMsg" role="status"></p>
+        </div>
+      </div>
     </section>
   </main>
 </div>
