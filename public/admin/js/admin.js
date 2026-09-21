@@ -286,8 +286,20 @@
   bindFileUpload($("pImageFile"), "image");
   bindFileUpload($("pVideoFile"), "video");
 
-  $("pImage").addEventListener("change", () => { if (!$("pImage").value) hideMediaPreview("image"); });
-  $("pVideoUrl").addEventListener("change", () => { if (!$("pVideoUrl").value) hideMediaPreview("video"); });
+  function bindUrlPreview(inputId, kind) {
+    const input = $(inputId);
+    if (!input) return;
+    const apply = () => {
+      const v = input.value.trim();
+      if (v) showMediaPreview(kind, v);
+      else hideMediaPreview(kind);
+    };
+    input.addEventListener("input", apply);
+    input.addEventListener("paste", () => setTimeout(apply, 0));
+    input.addEventListener("change", apply);
+  }
+  bindUrlPreview("pImage", "image");
+  bindUrlPreview("pVideoUrl", "video");
 
   $("productForm").addEventListener("submit", async e => {
     e.preventDefault();
