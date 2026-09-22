@@ -39,15 +39,10 @@
   }
 
   function refreshTotals() {
-    let subtotal = 0;
-    for (const item of cart.items) {
-      const p = productCache.get(item.id);
-      if (p) subtotal += p.price * item.qty;
-    }
-    const delivery = cart.isFreeDelivery(subtotal) ? 0 : cart.deliveryFee(subtotal);
-    document.getElementById("ckSubtotal").textContent = helpers.fmt(subtotal);
-    document.getElementById("ckDelivery").textContent = delivery === 0 ? "Free" : helpers.fmt(delivery);
-    document.getElementById("ckTotal").textContent = helpers.fmt(subtotal + delivery);
+    const t = cart.calculateTotals(cart.items);
+    document.getElementById("ckSubtotal").textContent = helpers.fmt(t.subtotal);
+    document.getElementById("ckDelivery").textContent = t.delivery === 0 ? "Free" : helpers.fmt(t.delivery);
+    document.getElementById("ckTotal").textContent = helpers.fmt(t.total);
   }
 
   function renderSummary() {
@@ -116,6 +111,7 @@
     try {
       const all = await store.get("/api/products?limit=200");
       all.forEach(p => productCache.set(p.id, p));
+      cart.attachPrices(all);
       const missing = cart.items.filter(i => !productCache.has(i.id));
       if (missing.length) {
         document.getElementById("checkoutEmpty").querySelector("h2").textContent = "Some items are unavailable";
@@ -125,6 +121,7 @@
         return;
       }
       renderSummary();
+      store.configPromise().catch(() => {}).then(() => renderSummary());
     } catch (err) {
       document.getElementById("checkoutLayout").style.display = "none";
       document.getElementById("checkoutEmpty").querySelector("h2").textContent = "Couldn't load your cart";

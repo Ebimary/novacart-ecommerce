@@ -24,13 +24,17 @@
   }
 
   function lineTotal(sum) {
-    sum.subtotal = 0;
-    for (const item of cart.items) {
-      const p = productCache.get(item.id);
-      if (p) sum.subtotal += p.price * item.qty;
-    }
-    sum.delivery = cart.isFreeDelivery(sum.subtotal) ? 0 : cart.deliveryFee(sum.subtotal);
-    sum.total = sum.subtotal + sum.delivery;
+    const t = cart.calculateTotals(cart.items);
+    sum.subtotal = t.subtotal;
+    sum.delivery = t.delivery;
+    sum.total = t.total;
+  }
+
+  function rowPrice(item) {
+    const p = productCache.get(item.id);
+    if (p) return Number(p.price);
+    const snap = Number(item.price);
+    return Number.isFinite(snap) ? snap : 0;
   }
 
   function render() {
@@ -38,6 +42,11 @@
     if (!count) {
       emptyEl().style.display = "block";
       layoutEl().style.display = "none";
+      itemsEl().innerHTML = "";
+      document.getElementById("sumSubtotal").textContent = helpers.fmt(0);
+      document.getElementById("sumDelivery").textContent = helpers.fmt(0);
+      document.getElementById("sumTotal").textContent = helpers.fmt(0);
+      document.getElementById("freeDeliveryNote").style.display = "none";
       return;
     }
     emptyEl().style.display = "none";
@@ -48,14 +57,18 @@
 
     itemsEl().innerHTML = cart.items.map((item, idx) => {
       const p = productCache.get(item.id);
-      if (!p) return "";
-      const out = p.stock <= item.qty;
+      const price = rowPrice(item);
+      const name = p ? p.name : "Item #" + item.id;
+      const image = p ? p.image : "";
+      const category = p ? p.category : "";
+      const out = p ? p.stock <= item.qty : false;
+      const maxNote = out ? ' <small>· max available</small>' : (p ? "" : ' <small>· syncing details…</small>');
       return `<div class="cart-item">
-        <img src="${helpers.esc(p.image)}" alt="${helpers.esc(p.name)}">
+        <img src="${helpers.esc(image)}" alt="${helpers.esc(name)}">
         <div class="ci-main">
-          <span class="ci-cat">${helpers.esc(p.category)}</span>
-          <a class="ci-name" href="/product?id=${p.id}">${helpers.esc(p.name)}</a>
-          <span class="ci-price">${helpers.fmt(p.price)}${out ? ' <small>· max available</small>' : ""}</span>
+          <span class="ci-cat">${helpers.esc(category)}</span>
+          <a class="ci-name" href="/product?id=${p ? p.id : item.id}">${helpers.esc(name)}</a>
+          <span class="ci-price">${helpers.fmt(price)}${maxNote}</span>
           <div class="ci-controls">
             <div class="qty">
               <button type="button" data-act="minus" data-idx="${idx}" aria-label="Decrease quantity">&minus;</button>
@@ -65,7 +78,7 @@
             <button class="remove-btn" data-act="remove" data-idx="${idx}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg> Remove</button>
           </div>
         </div>
-        <div class="ci-side"><span class="ci-total">${helpers.fmt(p.price * item.qty)}</span></div>
+        <div class="ci-side"><span class="ci-total">${helpers.fmt(price * Number(item.qty))}</span></div>
       </div>`;
     }).join("");
 
@@ -100,12 +113,16 @@
     cart.load();
     cart.refreshBadge();
     if (!cart.count()) { render(); return; }
+    /* Totals come straight from the price snapshots saved with each cart item,
+       so the correct subtotal/total is visible immediately — no waiting on the
+       products API (which previously left the summary at ₦0 until it loaded). */
+    render();
     try {
       await ensureProducts();
+      cart.attachPrices([...productCache.values()]);
     } catch (err) {
-      itemsEl().innerHTML = `<p style="color:var(--danger)">${helpers.esc(err.message)}</p>`;
-      return;
+      console.warn("[cart] product details could not be refreshed — totals still shown from saved prices.", err);
     }
-    render();
+    store.configPromise().catch(() => {}).then(() => render());
   });
 })();

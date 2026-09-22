@@ -70,11 +70,16 @@
     },
     save() { localStorage.setItem(CART_KEY, JSON.stringify(cart.items)); },
     count() { return cart.items.reduce((s, i) => s + (Number(i.qty) || 0), 0); },
-    add(id, qty) {
+    add(id, qty, price) {
       const items = cart.items;
       const existing = items.find(i => i.id === id);
-      if (existing) existing.qty += qty || 1;
-      else items.push({ id, qty: qty || 1 });
+      const storedPrice = Number.isFinite(Number(price)) ? Number(price) : (existing ? Number(existing.price) : 0);
+      if (existing) {
+        existing.qty += qty || 1;
+        if (Number.isFinite(Number(price))) existing.price = Number(price);
+      } else {
+        items.push({ id, qty: qty || 1, price: storedPrice });
+      }
       cart.save();
       cart.refreshBadge();
     },
@@ -94,11 +99,43 @@
       const count = cart.count();
       document.querySelectorAll("#cartCount").forEach(el => { el.textContent = count; el.style.display = count ? "grid" : "none"; });
     },
+    /* Single source of truth for every storefront total: the Cart page and the
+       Checkout page both compute through here so they can never disagree.
+       Prices are treated as numeric values, never formatted strings. Stock,
+       tax, discounts and final amounts are still enforced by the server when
+       the order is created — this is display-side math only. */
+    calculateTotals(items) {
+      let subtotal = 0;
+      let skipped = 0;
+      for (const item of (items || [])) {
+        const price = Number(item && item.price);
+        const qty = Number(item && item.qty) || 0;
+        if (!Number.isFinite(price) || price < 0) { skipped++; continue; }
+        subtotal += price * qty;
+      }
+      if (skipped) console.warn(`[cart] ${skipped} item(s) skipped from totals — missing or invalid price snapshot.`);
+      const delivery = cart.isFreeDelivery(subtotal) ? 0 : cart.deliveryFee(subtotal);
+      return { subtotal, delivery, total: subtotal + delivery, skipped };
+    },
+    /* Backfill price snapshots from live product data. Self-heals carts saved
+       before prices were stored and keeps totals accurate after price edits. */
+    attachPrices(products) {
+      if (!Array.isArray(products)) return;
+      let changed = false;
+      for (const it of cart.items) {
+        const p = products.find(x => Number(x && x.id) === Number(it.id));
+        if (p && Number.isFinite(Number(p.price)) && Number(it.price) !== Number(p.price)) {
+          it.price = Number(p.price);
+          changed = true;
+        }
+      }
+      if (changed) cart.save();
+    },
     deliveryFee(subtotal) {
-      return store.config.deliveryFee || 2500;
+      return (store.config && store.config.deliveryFee) || 2500;
     },
     isFreeDelivery(subtotal) {
-      return subtotal >= (store.config.freeDeliveryThreshold || 100000);
+      return subtotal >= ((store.config && store.config.freeDeliveryThreshold) || 100000);
     }
   };
 
@@ -133,7 +170,7 @@
     const sold = out ? '<div class="card-soldout"><span>Out of stock</span></div>' : "";
     const addBtn = out
       ? '<button class="btn btn-dark btn-sm" disabled>Out of Stock</button>'
-      : `<button class="btn btn-accent btn-sm add-btn" data-id="${p.id}">Add to Cart</button>`;
+      : `<button class="btn btn-accent btn-sm add-btn" data-id="${p.id}" data-price="${Number(p.price)}">Add to Cart</button>`;
     return `<article class="card">
       <a class="card-media" href="/product?id=${p.id}" aria-label="${helpers.esc(p.name)}">
         ${badge}
@@ -222,7 +259,7 @@
       const addBtn = e.target.closest(".add-btn");
       if (!addBtn) return;
       const id = Number(addBtn.dataset.id);
-      cart.add(id, 1);
+      cart.add(id, 1, Number(addBtn.dataset.price));
       toast("Added to cart");
     });
   }

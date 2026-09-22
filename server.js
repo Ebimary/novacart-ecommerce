@@ -48,7 +48,11 @@ const DEFAULT_DATABASE = "novacart";
    Render environment. With no host configured the emails are written to the
    server log (handy during development); once a host is set they are really
    delivered. */
-const BRAND_NAME = String(process.env.STORE_NAME || "NovaCart").trim() || "NovaCart";
+/* Customer-facing brand used in email subjects, headers and footers. STORE_NAME
+   may override it, but the fallback is the real store identity — never the
+   GitHub/project name. Internal technical identifiers (database, package, repo)
+   stay unchanged. */
+const BRAND_NAME = String(process.env.STORE_NAME || "Mary Gold Collection").trim() || "Mary Gold Collection";
 const SMTP_HOST = process.env.EMAIL_HOST || process.env.SMTP_HOST || "";
 const SMTP_PORT = Number(process.env.EMAIL_PORT || process.env.SMTP_PORT || 587);
 const SMTP_SECURE = /^(true|1)$/i.test(String(process.env.EMAIL_SECURE || process.env.SMTP_SECURE || ""));
@@ -58,7 +62,21 @@ const SMTP_USER = process.env.EMAIL_USER || process.env.SMTP_USER || "";
    whitespace is stripped before the secret reaches Nodemailer. */
 const SMTP_PASS = normalizeSecret(process.env.EMAIL_PASSWORD || process.env.SMTP_PASS || "");
 const MAIL_FROM_NAME = String(process.env.EMAIL_FROM_NAME || "").trim();
-const MAIL_FROM = String(process.env.EMAIL_FROM || process.env.MAIL_FROM || "").trim() || defaultFrom();
+/* Sender identity: the address always comes from the configured EMAIL_FROM /
+   MAIL_FROM (or the SMTP user as a last resort — never hard-coded), while the
+   display name is forced to the customer-facing brand so customers always see
+   "Mary Gold Collection <configured@example.com>", never the project name. */
+const MAIL_FROM = normalizedFrom(process.env.EMAIL_FROM || process.env.MAIL_FROM || "");
+
+function normalizedFrom(raw) {
+  const s = String(raw || "").trim();
+  const angled = s.match(/<([^>]+)>/);
+  const bare = /^[^\s@<>]+@[^\s@<>]+$/.test(s) ? [null, s] : null;
+  const addr = (angled || bare || [null, ""])[1].trim();
+  const name = MAIL_FROM_NAME || BRAND_NAME;
+  if (addr) return `${name} <${addr}>`;
+  return defaultFrom(); /* nothing configured — build from the SMTP user */
+}
 const STORE_EMAIL = (process.env.STORE_EMAIL || process.env.OWNER_EMAIL || ADMIN_EMAIL || "").trim().toLowerCase();
 
 /* Strips surrounding and internal whitespace from a secret value. Never logs
@@ -1041,7 +1059,7 @@ function orderNotificationMail(order, items, trackingUrl) {
        <p style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#44403c;line-height:1.7;margin:24px 0 0;">View the customer's tracking page:</p>
        ${trackButtonHtml(trackingUrl)}`
   });
-  return { to: STORE_EMAIL, subject: `New order ${order.order_number} — ${naira(order.total)}`, text, html };
+  return { to: STORE_EMAIL, subject: `${BRAND_NAME} — New Order ${order.order_number}`, text, html };
 }
 
 /* Customer-facing order confirmation with Track My Order CTA. */
@@ -1075,7 +1093,7 @@ function orderConfirmationMail(order, items, trackingUrl) {
          Questions? Reply to this email or reach us on WhatsApp and we'll help you out.
        </p>`
   });
-  return { to: order.email, subject: `Your ${BRAND_NAME} order ${order.order_number} is confirmed`, text, html };
+  return { to: order.email, subject: `Order ${order.order_number} Received — ${BRAND_NAME}`, text, html };
 }
 
 /* Customer notification on an order-status change. Only ever called with a
@@ -1085,33 +1103,33 @@ function orderStatusMail(order, items, trackingUrl) {
   const orderNo = order.order_number;
   const conf = {
     Confirmed: {
-      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Confirmed`,
+      subject: `${BRAND_NAME} — Your Order Has Been Confirmed`,
       heading: "Your order is confirmed",
       copy: "Your order has been confirmed and is now moving forward."
     },
     Processing: {
-      subject: `Your ${BRAND_NAME} Order ${orderNo} Is Being Prepared`,
+      subject: `${BRAND_NAME} — Your Order Is Being Processed`,
       heading: "We're preparing your order",
       copy: "Your order is now being prepared. We'll let you know the moment it ships."
     },
     Shipped: {
-      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Shipped`,
+      subject: `${BRAND_NAME} — Your Order Has Been Shipped`,
       heading: "Your order is on the way",
       copy: "Good news — your order has been shipped and is currently on its way to you."
     },
     Delivered: {
-      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Delivered`,
+      subject: `${BRAND_NAME} — Your Order Has Been Delivered`,
       heading: "Your order has been delivered",
       copy: `Your order has been delivered. Thank you for shopping with ${BRAND_NAME} — we hope you love it!`
     },
     Cancelled: {
-      subject: `Your ${BRAND_NAME} Order ${orderNo} Has Been Cancelled`,
+      subject: `${BRAND_NAME} — Your Order Has Been Cancelled`,
       heading: "Your order has been cancelled",
       copy: "Your order has been cancelled."
     }
   };
   const t = conf[order.status] || {
-    subject: `Your ${BRAND_NAME} Order ${orderNo}`,
+    subject: `${BRAND_NAME} — Order ${orderNo} Status Updated`,
     heading: order.status,
     copy: "Your order status has been updated."
   };

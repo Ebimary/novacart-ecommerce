@@ -85,11 +85,11 @@
       if (qty > 1) { qty--; document.getElementById("qtyValue").textContent = qty; }
     });
     if (addToCart) addToCart.addEventListener("click", () => {
-      cart.add(product.id, qty);
+      cart.add(product.id, qty, Number(product.price));
       toast("Added to cart");
     });
     if (buyNow) buyNow.addEventListener("click", () => {
-      cart.add(product.id, qty);
+      cart.add(product.id, qty, Number(product.price));
       location.href = "/checkout";
     });
   }
