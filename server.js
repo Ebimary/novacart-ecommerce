@@ -628,26 +628,45 @@ const htmlEscape = s => String(s == null ? "" : s)
 
 const naira = n => "₦" + Number(n || 0).toLocaleString("en-NG", { maximumFractionDigits: 0 });
 
-let transporter;
-function mailTransporter() {
-  if (transporter) return transporter;
-  if (!SMTP_HOST) return null;
-  transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_SECURE,
-    /* Port 587 (default) uses STARTTLS. Require TLS even when the server
-       doesn't advertise it so a message can never silently go out in
-       cleartext. TLS 1.2 minimum matches current Gmail requirements. */
-    requireTLS: !SMTP_SECURE,
-    tls: { minVersion: "TLSv1.2" },
-    /* Force the SMTP socket onto IPv4. Combined with setDefaultResultOrder
-       above this avoids the "connect ENETUNREACH <ipv6>:587" failure that
-       occurs on Render/cloud hosts without IPv6 connectivity. */
-    socketOptions: { family: 4 },
-    auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined
-  });
-  return transporter;
+/* Connection candidates for the SMTP server, newest first. Cloud hosts like
+   Render (and various home/office ISPs) frequently filter one of the two
+   standard submission ports, so if the configured port cannot be reached the
+   mail layer automatically retries on the other standard port (587 STARTTLS
+   vs 465 implicit TLS). Auth credentials are only ever used on the configured
+   host (or the canonical smtp.gmail.com alias) — never on an arbitrary host.
+   The candidate list stays deterministic for tests and debugging. */
+function smtpCandidates() {
+  const host = String(SMTP_HOST || "").trim();
+  if (!host) return [];
+  const canonical = host === "smtp.googlemail.com" ? "smtp.gmail.com" : host;
+  const auth = SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined;
+  const build = (useHost, usePort) => {
+    const implicitTls = usePort === 465;
+    return {
+      label: `${useHost}:${usePort}${implicitTls ? " (implicit TLS)" : " (STARTTLS)"}`,
+      host: useHost,
+      port: usePort,
+      secure: implicitTls ? true : SMTP_SECURE,
+      requireTLS: implicitTls ? false : !SMTP_SECURE,
+      tls: { minVersion: "TLSv1.2" },
+      connectionTimeout: 6000,
+      greetingTimeout: 6000,
+      socketTimeout: 20000,
+      socketOptions: { family: 4 },
+      auth
+    };
+  };
+  const out = [];
+  out.push(build(canonical, SMTP_PORT));
+  if (SMTP_PORT !== 465) out.push(build(canonical, 465));
+  if (SMTP_PORT !== 587) out.push(build(canonical, 587));
+  return out;
+}
+
+/* Nodemailer transporter for one candidate config. Not cached — each send
+   builds a fresh connection so a "poisoned" socket never blocks later sends. */
+function buildTransporter(cfg) {
+  return nodemailer.createTransport(cfg);
 }
 
 let mailVerifyState = null;   /* boot + on-demand; never contains secrets */
@@ -690,21 +709,27 @@ function boundedPromise(promise, ms, label) {
 }
 
 /* Non-blocking SMTP hello/verify. Safe result only. Never prevents the web
-   server from starting — email problems are logged clearly instead. */
+   server from starting — email problems are logged clearly instead. Tries every
+   candidate (e.g. 587 then 465) so a single blocked port can't sink mail. */
 async function verifyMail() {
-  const t = mailTransporter();
-  if (!t) {
+  const candidates = smtpCandidates();
+  if (!candidates.length) {
     mailVerifyState = { configured: false, ok: false, error: "SMTP not configured", checkedAt: Date.now() };
     return mailVerifyState;
   }
-const result = await boundedPromise(t.verify(), 12000, "SMTP verification");
-  if (result === true || (result && result.sent === true)) {
-    mailVerifyState = { configured: true, ok: true, error: null, host: SMTP_HOST, port: SMTP_PORT, checkedAt: Date.now() };
-    console.log(`[mail] SMTP verification: SUCCESS (${SMTP_HOST}:${SMTP_PORT})`);
-  } else {
-    mailVerifyState = { configured: true, ok: false, error: safeMailError(result && result.error), host: SMTP_HOST, port: SMTP_PORT, checkedAt: Date.now() };
-    console.error(`[mail] SMTP verification FAILED (${SMTP_HOST}:${SMTP_PORT}): ${mailVerifyState.error}`);
+  let lastError = "all candidates failed";
+  for (const cfg of candidates) {
+    const attempt = await boundedPromise(buildTransporter(cfg).verify(), 12000, `SMTP verification via ${cfg.label}`);
+    if (attempt === true || (attempt && attempt.sent === true)) {
+      mailVerifyState = { configured: true, ok: true, error: null, host: cfg.host, port: cfg.port, checkedAt: Date.now() };
+      console.log(`[mail] SMTP verification: SUCCESS (${cfg.label})`);
+      return mailVerifyState;
+    }
+    lastError = safeMailError(attempt && attempt.error);
+    console.error(`[mail] SMTP verification via ${cfg.label} FAILED: ${lastError}`);
   }
+  mailVerifyState = { configured: true, ok: false, error: lastError, host: SMTP_HOST, port: SMTP_PORT, checkedAt: Date.now() };
+  console.error(`[mail] SMTP verification FAILED (all candidates): ${lastError}`);
   return mailVerifyState;
 }
 
@@ -733,8 +758,8 @@ async function sendMail({ to, subject, text, html }, label) {
       require("fs").writeFileSync(path.join(dumpDir, `mail-${stamp}.html`), String(html || ""), "utf8");
     } catch (_) { }
   }
-  const t = mailTransporter();
-  if (!t) {
+  const candidates = smtpCandidates();
+  if (!candidates.length) {
     console.log(`[mail::dev] ${labelText} email -> ${to}`);
     console.log(`[mail::dev] Subject: ${subject}`);
     console.log(`[mail::dev] ---`);
@@ -743,18 +768,26 @@ async function sendMail({ to, subject, text, html }, label) {
     return { sent: false, dev: true, messageId: null, accepted: [], rejected: [] };
   }
   console.log(`[mail] Sending ${labelText} -> ${to}`);
-  try {
-    const info = await t.sendMail({ from: MAIL_FROM, to, subject, text, html });
-    const messageId = info && info.messageId ? String(info.messageId) : "";
-    const accepted = (info && info.accepted) || [];
-    const rejected = (info && info.rejected) || [];
-    console.log(`[mail] ${labelText} accepted -> ${to}${messageId ? ` messageId=${messageId}` : ""}`);
-    return { sent: true, messageId, accepted, rejected };
-  } catch (err) {
-    console.error(`[mail] ${labelText} FAILED -> ${to}`);
-    console.error(`[mail] SMTP error: ${safeMailError(err)}`);
-    return { sent: false, messageId: null, accepted: [], rejected: [], error: safeMailError(err) };
+  const msg = { from: MAIL_FROM, to, subject, text, html };
+  let lastError = "SMTP error";
+  for (const cfg of candidates) {
+    try {
+      const info = await buildTransporter(cfg).sendMail(msg);
+      const messageId = info && info.messageId ? String(info.messageId) : "";
+      const accepted = (info && info.accepted) || [];
+      const rejected = (info && info.rejected) || [];
+      console.log(`[mail] ${labelText} accepted -> ${to} via ${cfg.label}${messageId ? ` messageId=${messageId}` : ""}`);
+      return { sent: true, messageId, accepted, rejected, via: `${cfg.host}:${cfg.port}` };
+    } catch (err) {
+      const safe = safeMailError(err);
+      lastError = safe;
+      const authError = /invalid login|EAUTH|535|534|authentication|credentials/i.test(String((err && err.message) || err || ""));
+      console.error(`[mail] ${labelText} via ${cfg.label} FAILED: ${safe}${authError ? " (auth error — not retrying other ports)" : ""}`);
+      if (authError) break; /* bad credentials — the port is not the problem */
+    }
   }
+  console.error(`[mail] ${labelText} FAILED -> ${to}`);
+  return { sent: false, messageId: null, accepted: [], rejected: [], error: lastError };
 }
 
 /* Brand accent + status "pill" chips used inside emails. All styles inline for
@@ -1372,6 +1405,16 @@ class PostgresSessionStore extends session.Store {
   }
   console.log(`[mail] From: ${MAIL_FROM}`);
   console.log(`[mail] Base URL for email links: ${siteBaseUrl()}`);
+  if (SMTP_HOST) {
+    require("dns").lookup(SMTP_HOST, { all: true }, (err, addrs) => {
+      if (err) {
+        console.error(`[mail] DNS lookup for ${SMTP_HOST} failed: ${safeMailError(err)}`);
+      } else if (addrs && addrs.length) {
+        console.log(`[mail] ${SMTP_HOST} resolves to: ${addrs.map(a => `${a.address} (IPv${a.family})`).join(", ")}`);
+      }
+    });
+    console.log(`[mail] SMTP candidates: ${smtpCandidates().map(c => c.label).join(" -> ")}`);
+  }
   if (process.env.NODE_ENV === "production" && !mailCfg.configured) {
     console.warn("[mail] WARNING: SMTP is not fully configured in production — no real emails will be delivered. " +
       "Set EMAIL_HOST / EMAIL_USER / EMAIL_PASSWORD on Render (SMTP_* names are accepted as aliases).");
