@@ -12,6 +12,13 @@ const nodemailer = require("nodemailer");
 const multer = require("multer");
 const mediaStorage = require("./storage");
 
+/* Prefer IPv4 for outbound connections (nodemailer SMTP, webhooks, etc.).
+   Render and most cloud hosts have no IPv6 route, so when smtp.gmail.com
+   resolves to an AAAA (IPv6) address first the socket dies with
+   "connect ENETUNREACH ... - Local (:::0)" and mail silently fails. Resolving
+   IPv4-first makes delivery deterministic on those hosts. */
+require("dns").setDefaultResultOrder("ipv4first");
+
 /* PostgreSQL returns dates as JS Date objects by default. Reformat timestamps
    to the plain "YYYY-MM-DD HH:MM:SS" shared by the whole storefront (MySQL
    previously sent the same shape via dateStrings), so every frontend + email
@@ -634,6 +641,10 @@ function mailTransporter() {
        cleartext. TLS 1.2 minimum matches current Gmail requirements. */
     requireTLS: !SMTP_SECURE,
     tls: { minVersion: "TLSv1.2" },
+    /* Force the SMTP socket onto IPv4. Combined with setDefaultResultOrder
+       above this avoids the "connect ENETUNREACH <ipv6>:587" failure that
+       occurs on Render/cloud hosts without IPv6 connectivity. */
+    socketOptions: { family: 4 },
     auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined
   });
   return transporter;
