@@ -669,11 +669,90 @@ function buildTransporter(cfg) {
   return nodemailer.createTransport(cfg);
 }
 
+/* ------------------------------------------------------------------ */
+/*  HTTPS email API (primary delivery path where SMTP is blocked)      */
+/*                                                                     */
+/*  Render free web services block outbound SMTP ports 25/465/587      */
+/*  (platform policy since Sept 2025), so direct SMTP can never work    */
+/*  there — connections die before authentication. HTTPS (port 443) is  */
+/*  always allowed, so mail is delivered through an email-API provider  */
+/*  (Resend or Brevo) when EMAIL_API_PROVIDER + EMAIL_API_KEY are set.  */
+/*  Locally / on paid instances SMTP still works and needs no key.      */
+/* ------------------------------------------------------------------ */
+function emailApiConfig() {
+  const provider = String(process.env.EMAIL_API_PROVIDER || "").trim().toLowerCase();
+  const key = String(process.env.EMAIL_API_KEY || "").trim();
+  if ((provider === "resend" || provider === "brevo") && key) return { provider, key };
+  return null;
+}
+
+/* Split `Some Name <user@host>` / `user@host` into name + address for the
+   provider payloads (never fails — falls back to sane defaults). */
+function apiParseFrom(from) {
+  const s = String(from || "");
+  const m = s.match(/^(.*)<([^>]+)>\s*$/);
+  const name = (m ? m[1] : s).trim().replace(/^"|"$/g, "").trim();
+  const email = (m ? m[2] : s).trim();
+  return { name: name || BRAND_NAME, email };
+}
+
+/* Lightweight authenticated call proving the API key works. Safe — never
+   returns or logs the key. */
+async function apiVerify(cfg) {
+  if (typeof fetch !== "function") throw new Error("fetch unavailable (Node 18+ required)");
+  if (cfg.provider === "resend") {
+    const r = await fetch("https://api.resend.com/keys", { headers: { Authorization: `Bearer ${cfg.key}` } });
+    if (!r.ok) throw new Error(`Resend API ${r.status} ${(await r.text().catch(() => "")).slice(0, 200)}`);
+    return true;
+  }
+  const r = await fetch("https://api.brevo.com/v3/account", { headers: { "api-key": cfg.key } });
+  if (!r.ok) throw new Error(`Brevo API ${r.status} ${(await r.text().catch(() => "")).slice(0, 200)}`);
+  return true;
+}
+
+/* Deliver one message through the HTTPS provider. Throws on failure so the
+   caller can log/report the true error. */
+async function apiSend(cfg, { from, to, subject, text, html }) {
+  if (typeof fetch !== "function") throw new Error("fetch unavailable (Node 18+ required)");
+  if (cfg.provider === "resend") {
+    const body = { from, to: [to], subject };
+    if (text) body.text = text;
+    if (html) body.html = html;
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
+      body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`Resend API ${r.status}: ${String((data && (data.message || data.error)) || "request failed").slice(0, 200)}`);
+    return { sent: true, messageId: String((data && data.id) || ""), accepted: [to], rejected: [] };
+  }
+  const parsed = apiParseFrom(from);
+  const body = {
+    sender: { name: parsed.name, email: parsed.email },
+    to: [{ email: to }],
+    subject
+  };
+  if (text) body.textContent = text;
+  if (html) body.htmlContent = html;
+  const r = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "api-key": cfg.key },
+    body: JSON.stringify(body)
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Brevo API ${r.status}: ${String((data && (data.message || data.name)) || "request failed").slice(0, 200)}`);
+  return { sent: true, messageId: String((data && data.messageId) || ""), accepted: [to], rejected: [] };
+}
+
 let mailVerifyState = null;   /* boot + on-demand; never contains secrets */
 
 function mailConfigSummary() {
+  const api = emailApiConfig();
   return {
-    configured: smtpConfigured(),
+    configured: Boolean(api) || smtpConfigured(),
+    transport: api ? `https-api:${api.provider}` : (smtpConfigured() ? "smtp" : "none"),
+    api_provider: api ? api.provider : null,
     host: SMTP_HOST || "",
     port: SMTP_PORT,
     secure: SMTP_SECURE,
@@ -708,13 +787,26 @@ function boundedPromise(promise, ms, label) {
   });
 }
 
-/* Non-blocking SMTP hello/verify. Safe result only. Never prevents the web
-   server from starting — email problems are logged clearly instead. Tries every
-   candidate (e.g. 587 then 465) so a single blocked port can't sink mail. */
+/* Non-blocking delivery check (API or SMTP). Safe result only. Never prevents
+   the web server from starting — mail problems are logged clearly instead.
+   Prefers the HTTPS API when configured, otherwise tries every SMTP candidate
+   (e.g. 587 then 465) so a single blocked port can't sink mail. */
 async function verifyMail() {
+  const api = emailApiConfig();
+  if (api) {
+    const attempt = await boundedPromise(apiVerify(api), 12000, `Verification via ${api.provider}`);
+    if (attempt === true || (attempt && attempt.sent === true)) {
+      mailVerifyState = { configured: true, ok: true, error: null, transport: `https-api:${api.provider}`, checkedAt: Date.now() };
+      console.log(`[mail] Verification: SUCCESS (${api.provider} HTTPS API)`);
+      return mailVerifyState;
+    }
+    mailVerifyState = { configured: true, ok: false, error: safeMailError(attempt && attempt.error), transport: `https-api:${api.provider}`, checkedAt: Date.now() };
+    console.error(`[mail] Verification via ${api.provider} FAILED: ${mailVerifyState.error}`);
+    return mailVerifyState;
+  }
   const candidates = smtpCandidates();
   if (!candidates.length) {
-    mailVerifyState = { configured: false, ok: false, error: "SMTP not configured", checkedAt: Date.now() };
+    mailVerifyState = { configured: false, ok: false, error: "no mail transport configured", checkedAt: Date.now() };
     return mailVerifyState;
   }
   let lastError = "all candidates failed";
@@ -744,11 +836,12 @@ function emailStatusResult(r) {
   };
 }
 
-/* Never throws — SMTP problems are logged, not surfaced to callers. Emails are
+/* Never throws — mail problems are logged, not surfaced to callers. Emails are
    sent after the database transaction that created them commits, so a send
    failure never rolls back the order/subscription. Returns a truthful result
    ({sent, messageId, accepted, rejected[, error]}) so callers and the API
-   never claim success when SMTP rejected the message. */
+   never claim success when the provider rejected the message. Delivery prefers
+   the HTTPS email API (works on Render free tier), then SMTP, then console. */
 async function sendMail({ to, subject, text, html }, label) {
   const labelText = label || "Email";
   const dumpDir = process.env.MAIL_WRITE_HTML;
@@ -758,13 +851,25 @@ async function sendMail({ to, subject, text, html }, label) {
       require("fs").writeFileSync(path.join(dumpDir, `mail-${stamp}.html`), String(html || ""), "utf8");
     } catch (_) { }
   }
+  const api = emailApiConfig();
+  if (api) {
+    console.log(`[mail] Sending ${labelText} -> ${to} via ${api.provider} HTTPS API`);
+    const attempt = await boundedPromise(apiSend(api, { from: MAIL_FROM, to, subject, text, html }), 15000, "Email API");
+    if (attempt && attempt.sent) {
+      console.log(`[mail] ${labelText} accepted -> ${to} via ${api.provider}${attempt.messageId ? ` messageId=${attempt.messageId}` : ""}`);
+      return attempt;
+    }
+    console.error(`[mail] ${labelText} via ${api.provider} FAILED: ${attempt && attempt.error}`);
+    console.error(`[mail] ${labelText} FAILED -> ${to}`);
+    return { sent: false, messageId: null, accepted: [], rejected: [], error: (attempt && attempt.error) || "Email API failed" };
+  }
   const candidates = smtpCandidates();
   if (!candidates.length) {
     console.log(`[mail::dev] ${labelText} email -> ${to}`);
     console.log(`[mail::dev] Subject: ${subject}`);
     console.log(`[mail::dev] ---`);
     console.log(`[mail::dev] ${String(text).split("\n").join("\n[mail::dev] ")}`);
-    console.log(`[mail::dev] --- (no SMTP_HOST/EMAIL_HOST set — configure one to deliver real mail)`);
+    console.log(`[mail::dev] --- (no SMTP or email-API configured — configure one to deliver real mail)`);
     return { sent: false, dev: true, messageId: null, accepted: [], rejected: [] };
   }
   console.log(`[mail] Sending ${labelText} -> ${to}`);
@@ -1396,12 +1501,16 @@ class PostgresSessionStore extends session.Store {
   /* Boot-time email diagnostics — helpful on Render where the variables are
      supplied by the dashboard. Cleartext credentials are never printed. */
   const mailCfg = mailConfigSummary();
-  console.log(`[mail] SMTP config ${mailCfg.configured ? "detected" : "NOT detected — emails will be logged, not delivered"}`);
-  if (mailCfg.configured) {
-    console.log(`[mail] SMTP host: ${mailCfg.host}`);
-    console.log(`[mail] SMTP port: ${mailCfg.port}`);
-    console.log(`[mail] SMTP user: configured`);
-    console.log(`[mail] SMTP password: configured`);
+  if (mailCfg.api_provider) {
+    console.log(`[mail] Transport: ${mailCfg.transport} — HTTPS/443 is allowed on Render free tier (SMTP ports 25/465/587 are blocked since Sept 2025)`);
+  } else {
+    console.log(`[mail] SMTP config ${mailCfg.configured ? "detected" : "NOT detected — emails will be logged, not delivered"}`);
+    if (mailCfg.configured) {
+      console.log(`[mail] SMTP host: ${mailCfg.host}`);
+      console.log(`[mail] SMTP port: ${mailCfg.port}`);
+      console.log(`[mail] SMTP user: configured`);
+      console.log(`[mail] SMTP password: configured`);
+    }
   }
   console.log(`[mail] From: ${MAIL_FROM}`);
   console.log(`[mail] Base URL for email links: ${siteBaseUrl()}`);
@@ -1416,8 +1525,9 @@ class PostgresSessionStore extends session.Store {
     console.log(`[mail] SMTP candidates: ${smtpCandidates().map(c => c.label).join(" -> ")}`);
   }
   if (process.env.NODE_ENV === "production" && !mailCfg.configured) {
-    console.warn("[mail] WARNING: SMTP is not fully configured in production — no real emails will be delivered. " +
-      "Set EMAIL_HOST / EMAIL_USER / EMAIL_PASSWORD on Render (SMTP_* names are accepted as aliases).");
+    console.warn("[mail] WARNING: no email transport is configured in production — no real emails will be delivered. " +
+      "Set EMAIL_API_PROVIDER + EMAIL_API_KEY (resend or brevo) to deliver on Render free tier, " +
+      "or EMAIL_HOST / EMAIL_USER / EMAIL_PASSWORD (SMTP_* aliases work) on a paid instance.");
   }
   if (process.env.NODE_ENV === "production" && /localhost|127\.0\.0\.1/.test(siteBaseUrl())) {
     console.warn("[mail] WARNING: base URL looks like localhost in production — set APP_BASE_URL or confirm " +
@@ -2066,6 +2176,8 @@ class PostgresSessionStore extends session.Store {
     }
     res.json({
       configured: cfg.configured,
+      transport: cfg.transport,
+      api_provider: cfg.api_provider,
       host: cfg.host,
       port: cfg.port,
       secure: cfg.secure,
